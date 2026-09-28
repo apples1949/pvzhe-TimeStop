@@ -1,0 +1,10 @@
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\bin\Release\JTYTimeStop.deps.json
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\bin\Release\JTYTimeStop.dll
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\obj\Release\TimeStop.csproj.AssemblyReference.cache
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\obj\Release\TimeStop.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\obj\Release\TimeStop.AssemblyInfoInputs.cache
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\obj\Release\TimeStop.AssemblyInfo.cs
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\obj\Release\TimeStop.csproj.CoreCompileInputs.cache
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\obj\Release\JTYTimeStop.dll
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\obj\Release\refint\JTYTimeStop.dll
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\obj\Release\ref\JTYTimeStop.dll

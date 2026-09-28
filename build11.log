@@ -1,0 +1,39 @@
+  正在确定要还原的项目…
+  所有项目均是最新的，无法还原。
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1235,3): error CS1519: 成员声明中的标记“catch”无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1242,2): error CS8803: 顶级语句必须位于命名空间和类型声明之前。 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1242,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1293,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1321,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1344,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1354,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1391,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1424,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1446,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1474,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1493,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1516,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1526,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1531,1): error CS1022: 应输入类型、命名空间定义或文件尾 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+
+生成失败。
+
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1235,3): error CS1519: 成员声明中的标记“catch”无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1242,2): error CS8803: 顶级语句必须位于命名空间和类型声明之前。 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1242,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1293,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1321,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1344,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1354,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1391,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1424,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1446,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1474,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1493,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1516,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1526,2): error CS0106: 修饰符“private”对该项无效 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(1531,1): error CS1022: 应输入类型、命名空间定义或文件尾 [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
+    0 个警告
+    15 个错误
+
+已用时间 00:00:04.10
