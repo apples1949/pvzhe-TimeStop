@@ -1,0 +1,15 @@
+CMD: C:\Users\txgcs\WorkBuddy\zjb\tools\dotnet9\dotnet.exe build -c Release --no-restore -p:UseSharedCompilation=false -m:1 -nodeReuse:false -v:q -nologo
+CWD: C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src
+TEMP: C:\Users\txgcs\WorkBuddy\zjb\tools\dotnet_home\tmp
+
+RC=0
+--- STDOUT ---
+
+
+    0 个警告
+    0 个错误
+
+已用时间 00:00:29.47
+
+--- STDERR ---
+(empty)

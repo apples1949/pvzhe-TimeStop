@@ -48,6 +48,25 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	/// </summary>
 	private static readonly bool EnableInfoLog = false;
 
+	/// <summary>★ v1.0.13 诊断开关：只输出"选卡 / 铲子 命中判定"相关的少量行
+	/// （每次点击最多 3 行，不刷屏）。与 <see cref="EnableInfoLog"/> 相互独立，
+	/// 便于在日志总开关关闭的情况下精确排障。验证通过后置 false。</summary>
+	private static readonly bool EnablePickDiag = false;
+
+	/// <summary>
+	/// ★ v1.0.25 起的 **UI 形态内部开关**（v1.0.27 用户改回按钮）。
+	///   · `false` ⇒ 勾选框样式（`CheckBox`，与游戏「加速」同款）；
+	///   · `true`（**当前默认**）⇒ **自绘圆角按钮**（未触发绿字 / 触发中红字）。
+	///
+	/// ── 为什么最终选按钮 ────────────────────────────────────────────
+	/// 勾选框形态实测有"长按/连点抖动"：`CheckBox` 自身的 GUI 派发**与**
+	/// 我给自绘按钮做的兜底轮询（`PollButtonClick`）会**各触发一次**切换
+	/// （v1.0.26 已用 `if (!UseButtonStyle) return;` 关掉轮询来解，但按钮形态本就
+	/// 只有一条路径，最省心）。功能上两者完全等价。
+	/// 改这个值需要重新编译打包。
+	/// </summary>
+	private static readonly bool UseButtonStyle = true;
+
 	/// <summary>扫描节流：每 N 帧扫一次全树（找齿轮按钮 + 维持时停状态）。</summary>
 	private const int ScanStride = 6;
 
@@ -62,6 +81,27 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	private SceneTree _tree;
 	private Callable _tickCallable;
 	private bool _connected;
+
+	/// <summary>★ v1.0.14：`physics_frame` 信号的回调。
+	///
+	/// ── 为什么不再依赖 relay 节点 ─────────────────────────────────
+	/// Mod 程序集是**手写 csproj**（没有 `Godot.NET.Sdk` 的源码生成器）⇒
+	/// 自定义 `Node` 子类的 `_Input` / `_PhysicsProcess` / `_Process`
+	/// **引擎根本不会调用**（Godot 4 的 C# 脚本必须由源码生成器注册虚方法表；
+	/// 没有生成器时这些方法对引擎"不存在"）。
+	/// 而 `Callable.From(Action)` + `SceneTree.Connect("physics_frame", …)`
+	/// 走的是**信号**通道，不需要生成器，且**暂停时照样发**
+	/// （`SceneTree::physics_process()` 先 `emit_signal("physics_frame")`，
+	/// 之后才做受 `paused` 门控的 `_process(true)`）。
+	/// ⇒ v1.0.14 起，全部每帧驱动逻辑改由本回调承担；relay 只作兼容保留。
+	/// </summary>
+	private Callable _physCallable;
+
+	/// <summary>心跳诊断：确认物理帧回调真的在跑（只打一次）。</summary>
+	private bool _physHeartbeatLogged;
+
+	/// <summary>物理帧回调异常只报一次。</summary>
+	private bool _physFaultReported;
 	private bool _started;
 	private long _frame;
 	private bool _faultReported;
@@ -70,10 +110,12 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	private bool _timeStopOn;
 
 	/// <summary>自建的按钮 Label（找到齿轮后创建；齿轮重建则重新创建）。</summary>
-	private Label _button;
+	/// <summary>★ v1.0.25：类型放宽为 `Control` —— 按钮形态下是 `Label`，勾选框形态下是 `CheckBox`。</summary>
+	private Control _button;
 
 	/// <summary>承载按钮的 PanelContainer（画外边框用）。</summary>
-	private PanelContainer _buttonHost;
+	/// <summary>★ v1.0.25：类型放宽为 `Control` —— 按钮形态下是 `PanelContainer`，勾选框形态下是 `CheckBox`。</summary>
+	private Control _buttonHost;
 
 	/// <summary>把哪些节点改成了 Always —— 恢复时逐个还原。</summary>
 	private readonly List<(Node node, Node.ProcessModeEnum oldMode)> _keptAlive
@@ -119,6 +161,9 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			}
 			_tickCallable = Callable.From(new Action(OnProcessFrame));
 			_tree.Connect("process_frame", _tickCallable);
+			// ★ v1.0.14：物理帧信号（暂停时也发），替代 relay 的 `_PhysicsProcess`
+			_physCallable = Callable.From(new Action(OnPhysicsFrame));
+			_tree.Connect("physics_frame", _physCallable);
 			_connected = true;
 			_started = true;
 			Info("已挂载 process_frame（每 " + ScanStride + " 帧扫一次）。");
@@ -138,6 +183,7 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			if (_connected && _tree != null && GodotObject.IsInstanceValid(_tree))
 			{
 				_tree.Disconnect("process_frame", _tickCallable);
+				_tree.Disconnect("physics_frame", _physCallable);
 			}
 		}
 		catch (Exception ex)
@@ -152,6 +198,182 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	}
 
 	// ================================================================ 每帧
+
+	/// <summary>★ v1.0.14：物理帧驱动（**替代** relay 节点的 `_PhysicsProcess`）。
+	///
+	/// 暂停期间照样被调用：`SceneTree::physics_process()` 先 `emit_signal("physics_frame")`，
+	/// 之后才做受 `paused` 门控的 `_process(true)`；而 `Main::iteration()` 无条件调
+	/// `physics_process()`。⇒ 这是"暂停期间仍能跑 Mod 逻辑"的**唯一可靠通道**。
+	/// </summary>
+	private void OnPhysicsFrame()
+	{
+		try
+		{
+			if (!_timeStopOn)
+			{
+				return;
+			}
+			if (!_physHeartbeatLogged)
+			{
+				_physHeartbeatLogged = true;
+				PickDiag("PHYS 心跳：物理帧回调已生效（v1.0.14 信号通道）。");
+			}
+			DriveUiPicks();
+			DrivePlanting();
+			CollectDroppablesAtMouse();
+			RefreshPacketCooldownUi();
+		}
+		catch (Exception ex)
+		{
+			if (!_physFaultReported)
+			{
+				_physFaultReported = true;
+				PickDiag("PHYS 异常（只报一次）：" + ex.Message);
+			}
+		}
+	}
+
+	/// <summary>
+	/// ★★ v1.0.19：**时停期间手动刷新卡片的运行时可用性**（修"无视 CD 直接种"）。
+	///
+	/// 为什么必须手动刷：`TowerDefenseInGamePacketShow` 的 `alive`
+	/// （= `_cachedRuntimeAvailability && (_cachedUpgradePacket || !coldDownOpen)`，
+	/// 见 `ApplyCachedRuntimeAvailability()`）由**每帧的 `_PhysicsProcess`** 驱动。
+	/// 暂停时该回调不跑 ⇒ 种下后 `coldDownOpen` 虽然被置 true，但 `alive` **不再被重算**、
+	/// 停在 true ⇒ **冷却中的卡仍能被选中并种下**（用户实测：
+	/// "时停状态下可以无视 cd 消耗阳光直接种"）。
+	/// ⇒ 这里每轮对**卡池 + 卡槽**里的卡调一次 public 的 `RefreshRuntimeState()`，
+	///   让 CD / 可用性重新算准（不改变任何游戏规则，只是"把该刷的刷了"）。
+	/// </summary>
+	private void RefreshPacketCooldownUi()
+	{
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				return;
+			}
+			TowerDefenseBattleFeaturePacketBank feature = mgr.GetPacketBankFeature();
+			if (feature == null || !GodotObject.IsInstanceValid(feature))
+			{
+				return;
+			}
+			// ★★ v1.0.20：**三个列表都要刷** ——
+			//   ① `feature.packetBank.packetList`（`TowerDefenseInGamePacketBank.packetList`）：
+			//      **玩家在卡池/卡槽里看到并操作的那批卡**。这是最关键的 ——
+			//      `TowerDefenseBattleFeaturePacketBank` **自己也有一个 `packetList`**，
+			//      两者不是同一份；v1.0.19 刷的是 feature 那份 ⇒ **完全没刷到真正在用的卡**
+			//      ⇒ `alive` 不重算 ⇒ 冷却中的卡照样能被选中并种下。
+			//   ② `feature.packetBank.seedBank.packetList`：开局卡槽。
+			//   ③ `feature.packetList`：保险（可能有别的路径往里塞卡）。
+			// ★★ v1.0.23：**不再猜容器，直接全树搜 `TowerDefenseInGamePacketShow`**。
+			//   实测各条"正规路径"都不靠谱：
+			//     `CD 刷新：packetList=0 seedBank=0 feature=0 packetContainer=1`
+			//   —— 战斗中有 6+ 张卡，却只找到 1 个。卡的宿主容器随"卡池页签 / 卡槽 / 场景"
+			//   而变（`TowerDefenseInGamePacketBank.packetContainer`、
+			//   `TowerDefenseInGameSeedBank.packetContainer`、选卡界面各有各的），
+			//   与其逐个试，不如**一次全树搜干净**（数量就几十个，开销可忽略）。
+			int n = RefreshAllPackets();
+			_diagCdTotal = n;
+			if (EnablePickDiag && _cdDiag < 12)
+			{
+				_cdDiag++;
+				PickDiag("CD 刷新（全树）：共 " + n + " 张卡");
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>对一组 `TowerDefenseInGamePacketShow` 逐个调 `RefreshRuntimeState()`，返回处理了几张。</summary>
+	private static int RefreshPacketList(object listObj)
+	{
+		int n = 0;
+		try
+		{
+			if (!(listObj is Godot.Collections.Array arr))
+			{
+				return 0;
+			}
+			foreach (Variant v in arr)
+			{
+				if (v.AsGodotObject() is TowerDefenseInGamePacketShow p && GodotObject.IsInstanceValid(p))
+				{
+					p.RefreshRuntimeState();
+					n++;
+				}
+			}
+		}
+		catch { }
+		return n;
+	}
+
+	/// <summary>
+	/// ★★ v1.0.22：遍历 `packetContainer` 的**子节点**刷新 ——
+	/// 实测 `packetList` 一直是空的，而 `TowerDefenseInGamePacketBank.packetContainer`
+	/// （`public Control packetContainer`）才是**卡片 UI 的实际父节点**。
+	/// </summary>
+	private static int RefreshPacketContainer(object pkObj)
+	{
+		int n = 0;
+		try
+		{
+			Node container = GetMember(pkObj, "packetContainer") as Node;
+			if (container == null || !GodotObject.IsInstanceValid(container))
+			{
+				return 0;
+			}
+			foreach (Node child in container.GetChildren())
+			{
+				if (child is TowerDefenseInGamePacketShow p && GodotObject.IsInstanceValid(p))
+				{
+					p.RefreshRuntimeState();
+					n++;
+				}
+			}
+		}
+		catch { }
+		return n;
+	}
+
+	/// <summary>
+	/// ★★ v1.0.23：**全树搜索所有 `TowerDefenseInGamePacketShow` 并逐个 `RefreshRuntimeState()`**。
+	///
+	/// 为什么不再走"正规路径"：实测
+	///   · `packetList`（feature / packetBank / seedBank 三处）**全是 0**；
+	///   · `packetBank.packetContainer` 只有 1 个（战斗中有 6+ 张卡）；
+	///   · `packetBank.seedBank` 字段本身常常还是 null。
+	/// 卡的宿主容器随"卡池页签 / 卡槽 / 选卡界面 / 场景切换"而变，逐个猜代价太高
+	/// ⇒ 直接全树搜（`CollectByClassName`），一网打尽。
+	/// </summary>
+	private static int RefreshAllPackets()
+	{
+		int n = 0;
+		try
+		{
+			SceneTree tree = Engine.GetMainLoop() as SceneTree;
+			if (tree == null || !GodotObject.IsInstanceValid(tree) || tree.Root == null)
+			{
+				return 0;
+			}
+			var found = new List<Node>();
+			CollectByClassName(tree.Root, 0, "TowerDefenseInGamePacketShow", found, 300);
+			foreach (Node node in found)
+			{
+				if (node is TowerDefenseInGamePacketShow p && GodotObject.IsInstanceValid(p))
+				{
+					p.RefreshRuntimeState();
+					n++;
+				}
+			}
+		}
+		catch { }
+		return n;
+	}
+
+	/// <summary>CD 刷新诊断计数 / 上次刷到的卡数。</summary>
+	private int _cdDiag;
+	private int _diagCdTotal;
 
 	private void OnProcessFrame()
 	{
@@ -273,6 +495,23 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			{
 				return;
 			}
+			// ★ v1.0.13：捕获"左键刚按下"的边沿。
+			//   `_Input` 收到的事件天然是边沿事件（Pressed 只在按下那一刻为 true），
+			//   不依赖 `Input.IsMouseButtonPressed` 的轮询语义 ⇒ 与轮询边沿构成双路冗余。
+			if (event_ is InputEventMouseButton mb
+				&& mb.ButtonIndex == MouseButton.Left
+				&& mb.Pressed
+				&& mb.Device >= 0)
+			{
+				_pendingClick = true;
+				// ★ v1.0.13：在**输入事件当下**立刻驱动一次落点。
+				//   `PacketPickControl` 判定"确认种植"用的是 `mapControl.IsConfirmInput()`
+				//   → `Input.IsActionJustPressed("Press")`。该 API 在**物理帧**里比较
+				//   `pressed_physics_frame == Engine.get_physics_frames()`，放到下一物理帧再调
+				//   可能因帧号已推进而判 false（表现为"选中了但种不下去"）；
+				//   而在 `_Input` 回调里，`Input` 状态刚被本事件更新 ⇒ 一定为 true。
+				DrivePlanting();
+			}
 			// 只转发"战斗操作"相关事件：鼠标（含滚轮）与触摸。
 			// 键盘事件不转发 —— 避免干扰游戏自身的快捷键（暂停键、加速键等）。
 			bool relevant = event_ is InputEventMouse
@@ -332,6 +571,28 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			}
 			// ★ 重置去重缓存，强制本帧放行（暂停时物理帧号不推进）
 			SetMember(mapFeature, "_lastInputPhysicsFrame", ulong.MaxValue);
+
+			// ★ v1.0.13 诊断：把"落点"能否成功的前置条件逐项打出来（前 60 次）
+			if (EnablePickDiag && _plantDiag < 60)
+			{
+				_plantDiag++;
+				object ppc = GetMember(mapFeature, "packetPickControl");
+				object picked = GetMember(ppc, "packetPick");
+				object mc = GetMember(mapFeature, "mapControl");
+				string pickedName = "null";
+				if (picked is GodotObject pgo && GodotObject.IsInstanceValid(pgo))
+				{
+					pickedName = pgo.GetType().Name;
+				}
+				PickDiag("PLANT#" + _plantDiag
+					+ " ppc=" + (ppc != null)
+					+ " picked=" + pickedName
+					+ " needs=" + GetBoolByMethod(ppc, "NeedsInputProcessing")
+					+ " confirm=" + GetBoolByMethod(mc, "IsConfirmInput")
+					+ " phys=" + Engine.GetPhysicsFrames()
+					+ " paused=" + _tree.Paused);
+			}
+
 			InvokeMethod(mapFeature, "ProcessInput");
 		}
 		catch (Exception ex)
@@ -345,6 +606,9 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	}
 
 	private bool _driveFaultReported;
+
+	/// <summary>v1.0.13 落点诊断计数（只打前若干条，避免刷屏）。</summary>
+	private int _plantDiag;
 
 
 	/// <summary>
@@ -371,6 +635,11 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	{
 		try
 		{
+			// ★★ v1.0.24 —— **回退 v1.0.22 的"边沿触发"**。
+			//   用户确认："游戏设定本来就是鼠标滑过就会拾取"，**这不是 bug**。
+			//   ⇒ 恢复成"按住左键期间持续判定"（按住并划过阳光即拾取），
+			//     与游戏原生 `TowerDefenseSunBase._Input()` 的行为一致。
+			//   （v1.0.22 我把它误判成缺陷改掉了，属于画蛇添足，特此还原。）
 			if (!Input.IsMouseButtonPressed(MouseButton.Left))
 			{
 				return;
@@ -378,16 +647,30 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			Node charNode = FindCharacterNode();
 			if (charNode == null)
 			{
+				if (EnablePickDiag && _collectRunDiag < 3)
+				{
+					_collectRunDiag++;
+					PickDiag("COLLECT 找不到 CharacterNode（掉落物收集无法进行）。");
+				}
 				return;
 			}
-			// ⚠️ 坐标必须用 **Node2D 的世界坐标**（`Node2D.GetGlobalMousePosition()` = 视口鼠标位置
-			//   经 canvas transform 逆变换，含相机偏移）。用 `GetViewport().GetMousePosition()`
-			//   （纯视口坐标）在相机移动/`CharacterLayer.follow_viewport_enabled=true` 时会偏，
-			//   导致 `IsPointInCircle` 永远判不中 ⇒ 收不到阳光。
-			Node2D ref2d = charNode as Node2D;
-			Vector2 mouse = (ref2d != null)
-				? ref2d.GetGlobalMousePosition()
-				: (charNode.GetViewport()?.GetMousePosition() ?? Vector2.Zero);
+			if (EnablePickDiag && _collectRunDiag < 3)
+			{
+				_collectRunDiag++;
+				PickDiag("COLLECT 开始遍历 CharacterNode，子节点=" + charNode.GetChildCount() + "。");
+			}
+			// ★★ v1.0.19 修正坐标空间（实测凭据见下）：
+			//   旧写法用 `charNode.GetGlobalMousePosition()` —— 那是 **`CharacterNode` 自身局部
+			//   坐标系**下的鼠标（`get_global_transform_with_canvas().affine_inverse() * viewport_mouse`），
+			//   而 `sprite.GlobalPosition` 是**世界坐标**；两者差一个 `CharacterNode` 的完整变换
+			//   （含 `mapControl` 缩放与相机偏移）⇒ 距离恒偏大。
+			//   实测日志：`鼠标=(421.45, 46.49) 精灵=(300, 125) 距离=144.6 半径=40 命中=False`
+			//   （用户明明点在阳光上）；而偶尔对上时距离只有 8.7
+			//   ⇒ **判定逻辑没错，是两边不同坐标系**。
+			//   ⇒ 统一改用**窗口坐标**（= 玩家在屏幕上看到的那个位置），
+			//     与 `sprite.GetGlobalTransformWithCanvas()` 变换后的点直接比。
+			Viewport vp = charNode.GetViewport();
+			Vector2 mouse = (vp != null) ? vp.GetMousePosition() : Vector2.Zero;
 			int n = charNode.GetChildCount();
 			for (int i = 0; i < n; i++)
 			{
@@ -414,6 +697,9 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	}
 
 	private bool _collectFaultReported;
+
+	/// <summary>v1.0.17 收集流程诊断计数（只打前几次）。</summary>
+	private int _collectRunDiag;
 
 	/// <summary>
 	/// ★ v1.0.11 点击瞬态探针：仅在"鼠标左键按下"的那一帧打印
@@ -528,10 +814,21 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			{
 				return;
 			}
-			// 每帧无条件清零两个防抖位（见上：它们是"暂停冻结"的）
-			ClearDebounceStates();
-
-			if (!Input.IsMouseButtonPressed(MouseButton.Left))
+			// ★★ v1.0.13 核心修复：**边沿触发**（只认"按下的那一瞬间"）
+			//
+			// v1.0.11 用的是 `Input.IsMouseButtonPressed(MouseButton.Left)` —— 这是**按住**语义：
+			// 鼠标按住 0.2 秒 ≈ 12 帧，就会调 12 次 `TowerDefenseInGamePacketShow.Pressed()`；
+			// 而 `Pressed()` 内部是 `select = !select`（**切换**）⇒ 翻转偶数次**回到原样**，
+			// 表现就是"点了完全没反应"。更糟的是我还在每帧 `ClearDebounceStates()` 里
+			// 把游戏自带的 `pressDelayTimer = 0.2` 防抖清零了，等于亲手拆掉唯一的安全网。
+			// ⇒ 改为"按下瞬间处理一次"：`edge` 走本地轮询边沿，`fromRelay` 走 `_Input` 事件边沿
+			//    （双路冗余：任一路活着就不断，且同帧只消费一次）。
+			bool down = Input.IsMouseButtonPressed(MouseButton.Left);
+			bool edge = down && !_prevMouseDown;
+			_prevMouseDown = down;
+			bool fromRelay = _pendingClick;
+			_pendingClick = false;
+			if (!edge && !fromRelay)
 			{
 				return;
 			}
@@ -540,13 +837,16 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			{
 				return;
 			}
+			_lastPickClickFrame = f;
+
 			Viewport vp = _tree.Root.GetViewport();
-			if (vp == null)
+			Vector2 vpMouse = (vp != null) ? vp.GetMousePosition() : Vector2.Zero;
+			bool diag = EnablePickDiag && _pickClickDiag++ < 40;
+			if (diag)
 			{
-				return;
+				PickDiag("CLICK#" + _pickClickDiag + " 窗口鼠标=" + vpMouse
+					+ " edge=" + edge + " relay=" + fromRelay);
 			}
-			Vector2 vpMouse = vp.GetMousePosition();
-			bool diag = _pickClickDiag++ < 20;
 
 			// ── (1) 铲子：ShovelManager.ShovelButtonPressed() ────────
 			Node shovelMgr = null;
@@ -564,17 +864,29 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 				CollectByNameContains(shovelMgr, 0, new string[] { "ShovelButton" }, btns, 1);
 				if (btns.Count > 0 && btns[0] is Control sb)
 				{
-					bool hit = HitControlInCanvas(sb, vpMouse);
+					bool hit = HitControlInCanvas(sb);
 					if (diag)
 					{
-						Info("PICK[" + _pickClickDiag + "] 鼠标=" + vpMouse + " 铲子rect=" + sb.GetGlobalRect() + " 命中=" + hit);
+						PickDiag("  铲子 hit=" + hit + " rectWin=" + GetWindowRect(sb)
+							+ " localMouse=" + sb.GetLocalMousePosition());
 					}
 					if (hit)
 					{
-						_lastPickClickFrame = f;
 						SetMember(shovelMgr, "shovelPressedAwait", false);
+						// ★★ v1.0.16：必须**先切换按钮的按下状态**再调 `ShovelButtonPressed()`！
+						//   正常路径是 `ShovelManager._Input()`：
+						//       `shovelButton.ButtonPressed = !shovelButton.ButtonPressed;`
+						//       `ShovelButtonPressed();`
+						//   而 `ShovelButtonPressed()` 内部读的正是这个状态：
+						//       `PickShovel(shovelButton.ButtonPressed)`
+						//   ⇒ 直调时不切它，读到的就是 `false` ⇒ `PickShovel(false)` = **取消铲子**，
+						//     表现就是"能种植物但点不了铲子"（v1.0.15 实测）。
+						if (sb is BaseButton bb)
+						{
+							bb.ButtonPressed = !bb.ButtonPressed;
+						}
 						InvokeMethod(shovelMgr, "ShovelButtonPressed");
-						Info("★ 旁路：命中铲子按钮，已调用 ShovelButtonPressed()。");
+						PickDiag("  ★ 命中铲子 → ShovelButtonPressed() 已调用。");
 						return;
 					}
 				}
@@ -603,21 +915,28 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 					{
 						continue;
 					}
-					bool hit = HitControlInCanvas(target, vpMouse);
+					bool hit = HitControlInCanvas(target);
 					if (diag)
 					{
-						Info("PICK[" + _pickClickDiag + "] 鼠标=" + vpMouse + " 种子包(" + p.Name
-							+ ") rect=" + target.GetGlobalRect() + " 命中=" + hit);
+						PickDiag("  种子包(" + p.Name + "/" + target.Name + ") hit=" + hit
+							+ " rectWin=" + GetWindowRect(target)
+							+ " localMouse=" + target.GetLocalMousePosition()
+							+ " alive=" + GetBoolMember(p, "alive")
+							+ " lock=" + GetBoolMember(p, "lock")
+							+ " onlyDraw=" + GetBoolMember(p, "onlyDraw")
+							+ " select=" + GetBoolMember(p, "select"));
 					}
 					if (!hit)
 					{
 						continue;
 					}
-					_lastPickClickFrame = f;
+					// 只清"本次触发"用得上的那一个防抖位（不再每帧清，保住游戏自带防抖）
 					SetMember(p, "_pressDelayTimer", 0.0);
 					SetMember(p, "pressDelayTimer", 0.0);
+					bool before = GetBoolMember(p, "select");
 					InvokeMethod(p, "Pressed");
-					Info("★ 旁路：命中种子包，已调用 Pressed()。select=" + GetBoolMember(p, "select"));
+					bool after = GetBoolMember(p, "select");
+					PickDiag("  ★ 命中种子包(" + p.Name + ") → Pressed() select " + before + " → " + after);
 					return;
 				}
 				catch { }
@@ -637,6 +956,23 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	private bool _pickFaultReported;
 	private int _pickClickDiag;
 
+	/// <summary>v1.0.13 边沿检测：上一帧左键是否处于按下状态。</summary>
+	private bool _prevMouseDown;
+
+	/// <summary>v1.0.13：`_Input` 侧捕获到"左键刚按下"（与轮询边沿构成双路冗余）。</summary>
+	private bool _pendingClick;
+
+	/// <summary>选卡/铲子诊断输出（受 <see cref="EnablePickDiag"/> 门控；
+	/// 用 GD.Print 直出，不被日志总开关吞掉）。</summary>
+	private void PickDiag(string msg)
+	{
+		if (!EnablePickDiag)
+		{
+			return;
+		}
+		GD.Print("[TimeStop] " + msg);
+	}
+
 	/// <summary>每帧清零"被暂停冻结"的两个防抖状态位。</summary>
 	private void ClearDebounceStates()
 	{
@@ -653,14 +989,28 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	}
 
 	/// <summary>
-	/// ★ 命中判定。
+	/// ★ v1.0.13 命中判定（<b>已修正坐标系</b>）。
 	///
-	/// Godot 4 里 `Control.GetGlobalRect()` 返回的坐标**已经过祖先 transform 与所在
-	/// CanvasLayer 的 canvas transform**，与 `Viewport.GetMousePosition()`（窗口/视口坐标）
-	/// **在同一坐标系**，可直接比较。（`CanvasLayer` 自身没有 `GetCanvasTransform()` 方法，
-	/// canvas 变换由 viewport 内部应用在 `CanvasItem` 的 global transform 上。）
+	/// ── v1.0.11 为什么必然失败 ────────────────────────────────────
+	/// 旧写法是 `ctl.GetGlobalRect().HasPoint(viewport.GetMousePosition())`，**两个量不同坐标系**：
+	///   · `Control.GetGlobalRect()` = `Rect2(GetGlobalPosition(), Size)`，其
+	///     `GetGlobalPosition() = get_global_transform().xform(Vector2.Zero)` ——
+	///     **只含 Node2D / Control 祖先的 transform，不含 viewport 的 canvas transform**。
+	///   · `Viewport.GetMousePosition()` = **窗口（视口）像素坐标**。
+	///   种子包挂在 `BankUILayer`（**CanvasLayer**）下，`BankUILayer` 有自己的 scale/offset
+	///   ⇒ 两者相差整个 canvas 变换（日志实证：控件 rect 卡在 0~100，鼠标却报 1196）。
+	///   ⇒ 命中恒为 false ⇒ **永远不会触发选卡/铲子**。
+	///
+	/// ── 正确姿势（Godot 官方为此提供的 API）──────────────────────
+	/// `Control.GetLocalMousePosition()` 的内部实现就是：
+	///     `get_global_transform_with_canvas().affine_inverse().xform(viewport.get_mouse_position())`
+	/// 它**已经把 canvas transform 与全部祖先 transform 一起算进去了**，与控件自身
+	/// 的局部坐标（`GetRect()`）**天然同系** ⇒ 直接 `HasPoint` 即可，零手工换算。
+	///
+	/// ⚠️ 千万不要再改成 `CanvasLayer.GetCanvasTransform()` —— `CanvasLayer` **没有**这个方法
+	///    （只有 `CanvasItem.GetCanvasTransform()`），写了会 CS1061 编译失败。
 	/// </summary>
-	private static bool HitControlInCanvas(Control ctl, Vector2 viewportMouse)
+	private static bool HitControlInCanvas(Control ctl)
 	{
 		try
 		{
@@ -668,12 +1018,89 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			{
 				return false;
 			}
-			return ctl.GetGlobalRect().HasPoint(viewportMouse);
+			if (!ctl.IsInsideTree() || !ctl.IsVisibleInTree())
+			{
+				return false;
+			}
+			// ★★ v1.0.15 修正：**不能**用 `ctl.GetRect()` 配 `GetLocalMousePosition()`！
+			//
+			// Godot 4 的 `Control::get_rect()` 实现是 `Rect2(get_position(), get_size())`
+			// —— 它**含控件在父容器里的 position**；而 `Control::get_local_mouse_position()`
+			// 是 `get_global_transform_with_canvas().affine_inverse() * viewport_mouse`，
+			// 是**控件自身坐标系**（原点在控件左上角）。两者原点不同，直接 `HasPoint`
+			// 会把每张卡都判成"没点中"。
+			//
+			// 实测证据（v1.0.14 日志）：
+			//   `@Control@144` rectWin=(100,121) 94x60、localMouse=(50.72815, 50.991257)
+			//   —— 局部坐标明明落在 94x60 内，hit 却是 False；
+			//   因为 `GetRect().Position` 是它在 VFlowContainer 里的槽位偏移（y≈62），
+			//   而鼠标局部 y=51 < 62 ⇒ 落在 rect 之外。
+			// ⇒ 正确写法：`new Rect2(Vector2.Zero, ctl.Size)`。
+			bool hit = new Rect2(Vector2.Zero, ctl.Size).HasPoint(ctl.GetLocalMousePosition());
+			if (!hit)
+			{
+				return false;
+			}
+			return true;
 		}
 		catch
 		{
 			return false;
 		}
+	}
+
+	/// <summary>取控件在**窗口坐标**下的矩形（用于诊断打印，方便与鼠标位置直接比对）。</summary>
+	private static Rect2 GetWindowRect(Control ctl)
+	{
+		try
+		{
+			if (ctl == null || !GodotObject.IsInstanceValid(ctl) || !ctl.IsInsideTree())
+			{
+				return default(Rect2);
+			}
+			Transform2D xf = ctl.GetGlobalTransformWithCanvas();
+			// Godot 4 的 C# 绑定没有 `Transform2D.Xform()`（那是 Godot 3 的名字），
+			// 用 `Transform2D * Vector2` 运算符（等价，编译器直接内联）。
+			Vector2 p0 = xf * Vector2.Zero;
+			Vector2 p1 = xf * ctl.Size;
+			return new Rect2(p0, p1 - p0).Abs();
+		}
+		catch
+		{
+			return default(Rect2);
+		}
+	}
+
+	/// <summary>整体命中自检：Godot GUI 派发语义 = 取"最深的可点控件"。
+	/// 本方法在候选集合里挑出命中的那个（按树深度最大者优先）。</summary>
+	private static Control PickDeepestHit(List<Control> candidates)
+	{
+		Control best = null;
+		int bestDepth = -1;
+		foreach (Control c in candidates)
+		{
+			if (c == null || !GodotObject.IsInstanceValid(c))
+			{
+				continue;
+			}
+			if (!HitControlInCanvas(c))
+			{
+				continue;
+			}
+			int d = 0;
+			Node p = c.GetParent();
+			while (p != null)
+			{
+				d++;
+				p = p.GetParent();
+			}
+			if (d > bestDepth)
+			{
+				bestDepth = d;
+				best = c;
+			}
+		}
+		return best;
 	}
 
 	/// <summary>对单个候选节点做命中判定并收集（内部消化所有异常）。</summary>
@@ -715,28 +1142,62 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			if (!_collectDiagReported)
 			{
 				_collectDiagReported = true;
-				Info("收集诊断：节点 " + SafePath(node) + " 的 sprite 字段取不到（"
+				PickDiag("收集诊断：节点 " + SafePath(node) + " 的 sprite 字段取不到（"
 					+ (IsSubclassNamed(t, "TowerDefenseSunBase") ? "_sprite" : "spriteNode") + "）。");
 			}
 			return;
 		}
-		float dist = mouse.DistanceTo(sprite.GlobalPosition);
-		// ★ 诊断：把每次判定的数值打出来（只在前若干次），定位"为什么收不到"
-		if (_collectDiagCount < 40 && Input.IsMouseButtonPressed(MouseButton.Left))
+		// ★ v1.0.19：统一到**窗口坐标**（与玩家屏幕上看到的一致）。
+		//   `GetGlobalTransformWithCanvas()` 已含祖先 transform + canvas transform，
+		//   乘原点即得该精灵在窗口上的位置；半径按同一变换缩放（`Scale.X`）。
+		Transform2D xf = sprite.GetGlobalTransformWithCanvas();
+		Vector2 spriteWin = xf * Vector2.Zero;
+		float radiusWin = radius * Mathf.Max(0.01f, xf.Scale.X);
+		float dist = mouse.DistanceTo(spriteWin);
+		if (_collectDiagCount < 200 && Input.IsMouseButtonPressed(MouseButton.Left))
 		{
 			_collectDiagCount++;
-			Info("收集诊断[" + _collectDiagCount + "] 类型=" + t.Name
-				+ " 鼠标=" + mouse + " 精灵=" + sprite.GlobalPosition
-				+ " 距离=" + dist.ToString("F1") + " 半径=" + radius.ToString("F1")
-				+ " 命中=" + (dist <= radius));
+			PickDiag("收集诊断[" + _collectDiagCount + "] 类型=" + t.Name
+				+ " 鼠标(窗口)=" + mouse + " 精灵(窗口)=" + spriteWin
+				+ " 距离=" + dist.ToString("F1") + " 半径=" + radiusWin.ToString("F1")
+				+ " 命中=" + (dist <= radiusWin));
 		}
-		if (!Geometry2D.IsPointInCircle(mouse, sprite.GlobalPosition, radius))
+		if (dist > radiusWin)
 		{
 			return;
 		}
 		// ★ 调 public Collection()
+		// ★★ v1.0.21 真正的修复：`Collection()` 只是"开始收集"，**真正的结算在 Tween 回调里**
+		//
+		// `TowerDefenseSunBase.Collection()`（`TowerDefenseSunBase.cs:382`）：
+		//     if (!die && !isCollect) {
+		//         ...
+		//         isCollect = true;                       // ★ 先置位
+		//         _collectionTween = CreateTween();       // ★ 建 Tween
+		//         _collectionTween.TweenProperty(_sprite, "global_position", 相机+偏移, 1.0);
+		//         _collectionTween.TweenCallback(Callable.From(FinishCollectionFlightCallback));  // ★ 1 秒后结算
+		//     }
+		// ⇒ **`SceneTree.Paused = true` 时 Tween 不走**：
+		//   回调永不触发 ⇒ **不加阳光、飘飞动画不动、也永不销毁**；
+		//   而 `isCollect` 已经被置 true ⇒ **之后再点它会被 `!isCollect` 直接挡掉**（永久卡死）。
+		//   实测日志：`★ 已尝试收集：距离=18.8 调用前在树=True 调用后在树=True`
+		//   —— 调用了、但对象没消失，正是这个原因。
+		// ⇒ 修法：调用 `Collection()` 后，**手动补一次它本该由 Tween 触发的结算回调**。
+		//   （暂停期间本来也看不到那 1 秒的飞行动画，直接结算即可。）
+		bool wasInTree = GodotObject.IsInstanceValid(node) && node.IsInsideTree();
 		InvokeMethod(node, "Collection");
-		Info("★ 已主动收集：" + t.Name + " 距离=" + dist.ToString("F1"));
+		// `Collection()` 里会把三个参数存进字段，这里原样取出再喂给回调
+		object leaseVersion = GetMember(node, "_collectionLeaseVersion");
+		object collectCtx = GetMember(node, "_collectionContext");
+		object collectValue = GetMember(node, "_collectionValue");
+		if (leaseVersion != null)
+		{
+			InvokeMethod(node, "FinishCollectionFlight", leaseVersion, collectCtx, collectValue);
+		}
+		bool nowInTree = GodotObject.IsInstanceValid(node) && node.IsInsideTree();
+		PickDiag("★ 已尝试收集：" + t.Name + " 距离=" + dist.ToString("F1")
+			+ " 调用前在树=" + wasInTree + " 调用后在树=" + nowInTree
+			+ " isCollect=" + GetBoolMember(node, "isCollect"));
 	}
 
 	private int _collectDiagCount;
@@ -821,14 +1282,40 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 		}
 		try
 		{
-			FieldInfo f = target.GetType().GetField(fieldName,
+			// ★★ v1.0.18：同样**逐级遍历基类** —— 基类声明的 private 字段用
+			//   `GetField` 直接查是拿不到的（详见 `GetMember` 上的说明）。
+			for (Type t = target.GetType(); t != null; t = t.BaseType)
+			{
+				FieldInfo f = t.GetField(fieldName,
+					BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+				if (f != null)
+				{
+					f.SetValue(target, value);
+					return true;
+				}
+			}
+			return false;
+		}
+		catch { return false; }
+	}
+
+	/// <summary>反射调用无参方法并取 bool 返回值（取不到一律 false）。</summary>
+	private static bool GetBoolByMethod(object target, string methodName)
+	{
+		if (target == null)
+		{
+			return false;
+		}
+		try
+		{
+			MethodInfo mi = target.GetType().GetMethod(methodName,
 				BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-			if (f == null)
+			if (mi == null)
 			{
 				return false;
 			}
-			f.SetValue(target, value);
-			return true;
+			object r = mi.Invoke(target, null);
+			return r is bool b && b;
 		}
 		catch { return false; }
 	}
@@ -888,16 +1375,30 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 		}
 		try
 		{
-			Type t = target.GetType();
-			FieldInfo f = t.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-			if (f != null)
+			// ★★ v1.0.18：**必须逐级遍历基类**。
+			//   C# 的 `Type.GetField(name, NonPublic|Instance)` **只查当前类型自己声明的
+			//   私有字段，不查基类的**（`FlattenHierarchy` 也仅对 public/protected static 生效）。
+			//   实测踩坑：阳光节点是子类 `TowerDefenseSun`，而 `_sprite` 声明在基类
+			//   `TowerDefenseSunBase`（`private AdobeAnimateSprite _sprite;` +
+			//   只读属性 `public AdobeAnimateSprite sprite => _sprite;`）⇒
+			//   直接 `GetField("_sprite")` 返回 null ⇒ 收集时"取不到 sprite"、**永远收不了阳光**。
+			for (Type t = target.GetType(); t != null; t = t.BaseType)
 			{
-				return f.GetValue(target);
+				FieldInfo f = t.GetField(name,
+					BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+				if (f != null)
+				{
+					return f.GetValue(target);
+				}
 			}
-			PropertyInfo p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-			if (p != null)
+			for (Type t = target.GetType(); t != null; t = t.BaseType)
 			{
-				return p.GetValue(target);
+				PropertyInfo p = t.GetProperty(name,
+					BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+				if (p != null && p.CanRead)
+				{
+					return p.GetValue(target);
+				}
 			}
 		}
 		catch { }
@@ -937,6 +1438,20 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	{
 		try
 		{
+			// ★★ v1.0.26（用户："改成复选框后怎么还有点击的问题，长点会出现问题，
+			//   原版的复选框就没这个问题"）：
+			//   **勾选框形态下必须停掉轮询**。
+			//   `CheckBox` 自己走 Godot 的 GUI 派发（我已给它设 `ProcessMode = Always`，
+			//   暂停时同样能收到 `_gui_input`）⇒ 点一下就会自己切 `ButtonPressed`
+			//   并发 `Toggled`；此时**再叠加我这层轮询**，就会**一次点击触发两次 Toggle**
+			//   （长按 / 连点时尤其明显：开→关→开 抖动）。
+			//   原版复选框之所以没这问题，正是因为没有这层轮询。
+			//   轮询只保留给"自绘按钮"形态（那个不是原生按钮，暂停时收不到 GUI）。
+			if (!UseButtonStyle)
+			{
+				_pollDown = false;
+				return;
+			}
 			if (_buttonHost == null || !GodotObject.IsInstanceValid(_buttonHost))
 			{
 				return;
@@ -962,6 +1477,13 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			// 命中矩形：按钮的全局矩形（GlobalPosition + Size，含外框）
 			Vector2 gp = _buttonHost.GlobalPosition;
 			Vector2 gs = _buttonHost.Size;
+			// ★★ v1.0.24（用户反馈"有的时候时停按钮点了没反应"）：
+			//   布局尚未完成时 `Size` 会是 0 ⇒ `rect` 退化成空矩形 ⇒ **永远点不中**
+			//   （按钮明明画出来了，但那一两秒内点击无效）。给一个保底尺寸兜住。
+			if (gs.X < 1f || gs.Y < 1f)
+			{
+				gs = new Vector2(80f, 32f);
+			}
 			Rect2 rect = new Rect2(gp, gs);
 			// 竖直方向允许 6px 容差（贴太紧时好点）
 			rect = rect.Grow(3f);
@@ -976,9 +1498,18 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 				_lastClickFrame = f;
 				Toggle();
 			}
+			else if (EnablePickDiag && _btnMissDiag < 20)
+			{
+				_btnMissDiag++;
+				PickDiag("按钮未命中：鼠标=" + mp + " 按钮矩形=" + rect + " size=" + gs
+					+ " 可见=" + _buttonHost.Visible);
+			}
 		}
 		catch { }
 	}
+
+	/// <summary>按钮未命中诊断计数。</summary>
+	private int _btnMissDiag;
 
 	/// <summary>鼠标左键是否处于按下（用于轮询去重）。</summary>
 	private bool _pollDown;
@@ -987,8 +1518,49 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	private long _lastClickFrame = long.MinValue;
 
 	/// <summary>找到定位基准（加速按钮，回退齿轮）并把「时停」放到它下方。</summary>
+	/// <summary>
+	/// ★ v1.0.17：判断"是否已在关卡战斗中"。
+	/// 用来把「时停」按钮限制在**关卡内**显示（主菜单 / 地图界面不出现它）。
+	/// 判据：存在 `TowerDefenseControlNew` 且其 `isGameRunning == true`
+	/// （该字段由 `GameRunningEntered()` 置 true，正是"游戏开始"那一刻）。
+	/// </summary>
+	private bool IsInBattle(Node root)
+	{
+		try
+		{
+			if (root == null || !GodotObject.IsInstanceValid(root))
+			{
+				return false;
+			}
+			Node ctl = FindNodeByClassName(root, "TowerDefenseControlNew");
+			if (ctl == null || !GodotObject.IsInstanceValid(ctl))
+			{
+				return false;
+			}
+			return GetBoolMember(ctl, "isGameRunning");
+		}
+		catch
+		{
+			return false;
+		}
+	}
+
 	private void EnsureButton(Node root)
 	{
+		// ★ v1.0.17（用户要求）：**只在关卡内显示按钮** —— 主菜单 / 地图界面不要出现它。
+		//   判据 = 关卡控制器存在且 `isGameRunning`（战斗已开始）。
+		if (!IsInBattle(root))
+		{
+			if (_buttonHost != null && GodotObject.IsInstanceValid(_buttonHost))
+			{
+				_buttonHost.Visible = false;
+			}
+			return;
+		}
+		if (_buttonHost != null && GodotObject.IsInstanceValid(_buttonHost))
+		{
+			_buttonHost.Visible = true;
+		}
 		// 已存在且仍然有效 → 更新颜色 + 校正位置（进关卡时按钮尺寸可能后layout 才有）
 		if (_button != null && GodotObject.IsInstanceValid(_button))
 		{
@@ -1012,7 +1584,88 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 		{
 			return;
 		}
-		CreateButtonNear(anchorBtn);
+		if (UseButtonStyle)
+		{
+			CreateButtonNear(anchorBtn);
+		}
+		else
+		{
+			CreateCheckBoxNear(anchorBtn);
+		}
+	}
+
+	/// <summary>
+	/// ★ v1.0.25：创建**勾选框**形态（默认）。
+	///
+	/// 直接照抄游戏自带的「加速」：同一种节点（`CheckBox`）、挂在同一个父容器
+	/// （`TowerDefenseControlNew/GUITop`，`CheckBox2X` 就在那儿）下 ⇒
+	/// **样式完全由游戏 Theme 提供，外观与「加速」一致**，不需要手绘。
+	///
+	/// ⚠️ 必须 `ProcessMode = Always`：暂停时继承自根（Pausable）的 `Control`
+	///    收不到 `_gui_input`（这是 v1.0.3 踩过的坑）。
+	/// </summary>
+	private void CreateCheckBoxNear(Control anchorBtn)
+	{
+		try
+		{
+			Node parent = anchorBtn.GetParent();
+			if (parent == null)
+			{
+				return;
+			}
+			CheckBox cb = new CheckBox
+			{
+				Name = ButtonName,
+				Text = "时停",
+				ButtonPressed = _timeStopOn,
+				ProcessMode = Node.ProcessModeEnum.Always,
+				MouseDefaultCursorShape = Control.CursorShape.PointingHand,
+			};
+			cb.Toggled += OnTimeStopToggled;
+			parent.AddChild(cb, false, Node.InternalMode.Disabled);
+
+			// 贴在基准按钮（加速）正下方
+			cb.GlobalPosition = new Vector2(anchorBtn.GlobalPosition.X,
+				anchorBtn.GlobalPosition.Y + anchorBtn.Size.Y + 6f);
+			cb.CustomMinimumSize = new Vector2(Mathf.Max(anchorBtn.Size.X, 72f), 0f);
+
+			_button = cb;
+			_buttonHost = cb;    // 复用"宿主"引用：轮询命中判定 / 位置校正都靠它
+			Info("已创建「时停」勾选框（CheckBox 样式，与「加速」同款）。");
+		}
+		catch (Exception ex)
+		{
+			Warn("创建「时停」勾选框失败（已吞）：" + ex.Message);
+		}
+	}
+
+	/// <summary>勾选框切换回调（`Toggled` 信号）。</summary>
+	private void OnTimeStopToggled(bool pressed)
+	{
+		try
+		{
+			// ★ v1.0.28：同样过防抖闸门（两条输入路径共用同一道闸）
+			if (!PassToggleGate())
+			{
+				return;
+			}
+			if (pressed == _timeStopOn)
+			{
+				return;
+			}
+			if (pressed)
+			{
+				Engage();
+			}
+			else
+			{
+				Disengage("用户取消勾选");
+			}
+		}
+		catch (Exception ex)
+		{
+			Warn("勾选框切换异常（已吞）：" + ex.Message);
+		}
 	}
 
 	/// <summary>基准按钮位置/尺寸变了（分辨率、UI 缩放、进关卡）时，把按钮重新对齐到它正下方。</summary>
@@ -1247,13 +1900,16 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 		{
 			Color fg = _timeStopOn ? RedColor : GreenColor;
 			Color bd = _timeStopOn ? BorderRed : BorderGreen;
-			if (_button != null && GodotObject.IsInstanceValid(_button))
+			// ★ v1.0.25：两种 UI 形态都能安全跑 ——
+			//   勾选框（`CheckBox`）**刻意不改色**，保持游戏原生样式（与「加速」一致）；
+			//   自绘按钮（`Label` + `PanelContainer`）才做绿/红着色。
+			if (_button is Label lb && GodotObject.IsInstanceValid(lb))
 			{
-				_button.AddThemeColorOverride("font_color", fg);
+				lb.AddThemeColorOverride("font_color", fg);
 			}
-			if (_buttonHost != null && GodotObject.IsInstanceValid(_buttonHost))
+			if (_buttonHost is PanelContainer pc && GodotObject.IsInstanceValid(pc))
 			{
-				StyleBoxFlat sb = _buttonHost.GetThemeStylebox("panel") as StyleBoxFlat;
+				StyleBoxFlat sb = pc.GetThemeStylebox("panel") as StyleBoxFlat;
 				if (sb != null)
 				{
 					sb.BorderColor = bd;
@@ -1295,6 +1951,13 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 
 	private void Toggle()
 	{
+		// ★★ v1.0.28（用户建议）：**成功切换后 1 秒内不接受新的切换**。
+		//   彻底根治"长按 / 连点抖动"—— 不依赖去重帧号、也不去猜是哪条输入路径触发的，
+		//   直接给状态加一个时间闸门（原版加速复选框体感上也没法连点刷）。
+		if (!PassToggleGate())
+		{
+			return;
+		}
 		if (_timeStopOn)
 		{
 			Disengage("用户点击关闭");
@@ -1304,6 +1967,44 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			Engage();
 		}
 		UpdateButtonVisual();
+		SyncCheckBoxState();
+	}
+
+	/// <summary>切换防抖闸门：距上次成功切换不足 <see cref="ToggleDebounceMs"/> 就直接拒掉。</summary>
+	private bool PassToggleGate()
+	{
+		ulong now = Time.GetTicksMsec();
+		if (_lastToggleMsec != 0 && now - _lastToggleMsec < ToggleDebounceMs)
+		{
+			// 被闸门拦下时，把勾选框视觉与真实状态同步回去（否则勾选框会"骗人"）
+			SyncCheckBoxState();
+			return false;
+		}
+		_lastToggleMsec = now;
+		return true;
+	}
+
+	/// <summary>最近一次成功切换时停的时刻（`Time.GetTicksMsec()`）。</summary>
+	private ulong _lastToggleMsec;
+
+	/// <summary>切换防抖窗口（毫秒）。用户要求"成功触发后 1 秒内不让改时停状态"。</summary>
+	private const ulong ToggleDebounceMs = 1000;
+
+	/// <summary>
+	/// ★ v1.0.25：把 `_timeStopOn` 同步到勾选框的视觉状态。
+	/// 走"轮询命中"那条路（`PollButtonClick` → `Toggle()`）时，勾选框自己不会变，
+	/// 必须手动同步；用 `SetPressedNoSignal` 避免反过来再触发一次 `Toggled`。
+	/// </summary>
+	private void SyncCheckBoxState()
+	{
+		try
+		{
+			if (_button is CheckBox cb && GodotObject.IsInstanceValid(cb) && cb.ButtonPressed != _timeStopOn)
+			{
+				cb.SetPressedNoSignal(_timeStopOn);
+			}
+		}
+		catch { }
 	}
 
 	/// <summary>开启时停：冻结世界 + 保活交互层。</summary>

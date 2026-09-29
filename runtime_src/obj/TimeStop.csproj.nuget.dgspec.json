@@ -10,7 +10,7 @@
         "projectUniqueName": "C:\\Users\\txgcs\\WorkBuddy\\zjb\\mod\\TimeStop\\runtime_src\\TimeStop.csproj",
         "projectName": "JTYTimeStop",
         "projectPath": "C:\\Users\\txgcs\\WorkBuddy\\zjb\\mod\\TimeStop\\runtime_src\\TimeStop.csproj",
-        "packagesPath": "C:/Users/txgcs/WorkBuddy/zjb/tools/.dotnet_home\\.nuget\\packages\\",
+        "packagesPath": "C:\\Users\\txgcs\\WorkBuddy\\zjb\\tools\\nuget",
         "outputPath": "C:\\Users\\txgcs\\WorkBuddy\\zjb\\mod\\TimeStop\\runtime_src\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
