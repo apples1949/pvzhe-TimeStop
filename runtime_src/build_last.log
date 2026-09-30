@@ -2,16 +2,16 @@
 0 个警告
     0 个错误
 
-已用时间 00:00:08.45
+已用时间 00:00:07.92
 [compile] OK
 [package] RC=0
 [护栏0] Runtime/ModAssembly.dll 与最新编译产物不一致 → 自动用编译产物覆盖
-       编译产物 bin/Release: 1342600b4d7bda1e31d558e4c43359a7
-       Runtime/ 原值      : 2b83880741181d21a9647a5b08d03055
-       已更新 Runtime/ModAssembly.dll -> 1342600b4d7bda1e31d558e4c43359a7
+       编译产物 bin/Release: 321f2752add7a9288d8ed7b77356d98d
+       Runtime/ 原值      : 1342600b4d7bda1e31d558e4c43359a7
+       已更新 Runtime/ModAssembly.dll -> 321f2752add7a9288d8ed7b77356d98d
 OK -> C:/Users/txgcs/WorkBuddy/zjb/mod/dist\TimeStop.pmod
-  大小: 17291 字节
+  大小: 18705 字节
   内容: ['mod.json', 'Runtime/ModAssembly.dll']
-  包内 DLL md5: 1342600b4d7bda1e31d558e4c43359a7 （应与 bin/Release 及装机包一致）
-[install] C:\Users\txgcs\AppData\Roaming\Godot\app_userdata\植物大战僵尸杂交版\Mods\TimeStop.pmod (17291 B)
+  包内 DLL md5: 321f2752add7a9288d8ed7b77356d98d （应与 bin/Release 及装机包一致）
+[install] C:\Users\txgcs\AppData\Roaming\Godot\app_userdata\植物大战僵尸杂交版\Mods\TimeStop.pmod (18705 B)
 [cache] move rc=0 移动了　        1 个目录。

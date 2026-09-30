@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "timestop",
   "name": "时停",
-  "version": "1.0.29",
+  "version": "1.0.30",
   "author": "本地",
   "description": "在游戏内「加速」按钮正下方新增「时停」按钮：点击后冻结整个战场（僵尸/子弹/植物/飘落阳光全部静止），但仍可正常种植、铲除植物与收集阳光金币。未触发时显示绿色，触发中显示红色。v1.0.14：★ 根因修复 —— Mod 程序集是手写 csproj、没有 Godot 源码生成器，自定义 Node 子类的 _Input/_PhysicsProcess 引擎根本不会调用；改用 SceneTree 的 physics_frame / process_frame 信号通道驱动全部逻辑。并修正选卡命中判定坐标系与「按住重复触发」两个 bug。",
   "dependencies": [],

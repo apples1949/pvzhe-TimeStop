@@ -166,6 +166,9 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			_tree.Connect("physics_frame", _physCallable);
 			_connected = true;
 			_started = true;
+			// ★ v1.0.30：窗口级输入中继 —— 时停期间把"点/拖/动"转发给角色的
+			//   `MousePressComponent`（加农炮瞄准/开火走的就是它）。
+			HookWindowInput();
 			Info("已挂载 process_frame（每 " + ScanStride + " 帧扫一次）。");
 		}
 		catch (Exception ex)
@@ -180,6 +183,7 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 		{
 			// 退出前必须先解除时停，否则会把整个游戏卡住
 			Disengage("Shutdown");
+			UnhookWindowInput();
 			if (_connected && _tree != null && GodotObject.IsInstanceValid(_tree))
 			{
 				_tree.Disconnect("process_frame", _tickCallable);
@@ -2741,5 +2745,281 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	{
 		try { if (_context != null) { _context.Warn(LogPrefix + msg); } else { GD.PrintErr(LogPrefix + msg); } }
 		catch { }
+	}
+
+	// ================================================================ 时停期间：加农炮瞄准 / 开火（v1.0.30）
+	//
+	// ── 需求 ────────────────────────────────────────────────────────
+	// 时停期间允许"点击加农炮 → 选择发射地点"的操作。
+	//
+	// ── 根因（读源码定案）───────────────────────────────────────────
+	// 加农炮的点击链路是 `MousePressComponent`（Marker/Line 两种模式）：
+	//   · 事件入口：`TowerDefenseCharacter._Input(e)` → `componentManager.DispatchRuntimeInput(e)`
+	//     → 各组件 `ProcessInput(e)`（`MousePressComponent.ProcessInput` 是 internal）。
+	//   · **暂停时 `TowerDefenseCharacter`（Pausable）收不到 `_Input`** ⇒ 炮点不了。
+	//   · 组件侧的门控 `CanInteract()` 只要求 `IsGameRunning()`（= `currentControl.isGameRunning`，
+	//     **暂停不影响它**）+ `_inputReady` + `inGame` + 组件 `Alive`（= `canFire`，装填好了才 true），
+	//     **都不受暂停影响** ⇒ 只要有人把事件送进来，炮就能在时停里正常瞄准/开火。
+	//   · Marker 模式（玉米加农炮这类）是 **ToggleMode 两段式**：第 1 次按下进入瞄准
+	//     （`ToggleTarget` 瞄准标记跟着指针走，纯设坐标，暂停下也有效），第 2 次按下
+	//     `FinishAim` → `OnFinishPressed` → `CannonComponent.FireAt(pos)`。
+	//     ⚠️ `FireAt` 只置状态/发状态机事件，炮弹真正飞出要等状态机动画推进
+	//        ⇒ **解除时停后炮弹才发射**（这是引擎的暂停语义，非本 Mod 能绕过）。
+	//
+	// ── 实现 ────────────────────────────────────────────────────────
+	// 窗口级输入中继：`Window.WindowInput` 在 **暂停时照样发**（窗口层不受节点 ProcessMode 门控）。
+	// 时停开启时，把"左键按下/抬起、触摸按下/抬起、拖动、鼠标移动"原样转发给所有
+	// `MousePressComponent.ProcessInput`（internal ⇒ 反射调用；命中判定由组件自己做，
+	// 与正常游玩完全同一条代码路径）。非时停状态直接返回（游戏自己的 `_Input` 在处理，避免双份）。
+	//
+	// ⚠️ 事件坐标：`WindowInput` 给的是**窗口像素**坐标，而组件在正常游玩时收到的是
+	//    `Viewport`（内容缩放后）坐标 —— 用 `Root.GetFinalTransform().AffineInverse()` 转换
+	//    （这正是 Godot `Viewport::push_input` 内部做的同一步变换）。
+	//
+	// ⚠️ 自家按钮防误触：点「时停」按钮时不能顺手指挥加农炮 —— 转发前先做矩形排除。
+
+	private bool _windowInputHooked;
+
+	/// <summary>`MousePressComponent.ProcessInput`（internal ⇒ 反射缓存）。</summary>
+	private System.Reflection.MethodInfo _mpiMousePressInput;
+
+	/// <summary>角色列表缓存（同一帧内复用；输入事件频率高于帧率）。</summary>
+	private Godot.Collections.Array _cachedCharacters;
+	private long _cachedCharFrame;
+
+	private void HookWindowInput()
+	{
+		try
+		{
+			if (_windowInputHooked)
+			{
+				return;
+			}
+			Window root = (_tree != null && GodotObject.IsInstanceValid(_tree)) ? _tree.Root : null;
+			if (root == null)
+			{
+				return;
+			}
+			root.WindowInput += OnWindowInputForComponents;
+			_windowInputHooked = true;
+		}
+		catch (Exception ex)
+		{
+			Warn("挂载窗口输入中继异常（已吞）：" + ex.Message);
+		}
+	}
+
+	private void UnhookWindowInput()
+	{
+		try
+		{
+			if (!_windowInputHooked)
+			{
+				return;
+			}
+			Window root = (_tree != null && GodotObject.IsInstanceValid(_tree)) ? _tree.Root : null;
+			if (root != null)
+			{
+				root.WindowInput -= OnWindowInputForComponents;
+			}
+			_windowInputHooked = false;
+		}
+		catch (Exception ex)
+		{
+			Warn("卸载窗口输入中继异常（已吞）：" + ex.Message);
+		}
+	}
+
+	/// <summary>窗口坐标 → 视口（内容缩放后）坐标。</summary>
+	private Vector2 WindowToViewport(Vector2 windowPos)
+	{
+		try
+		{
+			Window root = (_tree != null && GodotObject.IsInstanceValid(_tree)) ? _tree.Root : null;
+			if (root == null)
+			{
+				return windowPos;
+			}
+			return root.GetFinalTransform().AffineInverse() * windowPos;
+		}
+		catch
+		{
+			return windowPos;
+		}
+	}
+
+	/// <summary>这次点击是否落在自家「时停」按钮上（是则不转发，避免顺手开炮）。</summary>
+	private bool IsOverModButton(Vector2 viewportPos)
+	{
+		try
+		{
+			for (int i = 0; i < 2; i++)
+			{
+				Control c = (i == 0) ? _buttonHost : _button;
+				if (c == null || !GodotObject.IsInstanceValid(c) || !c.Visible)
+				{
+					continue;
+				}
+				Rect2 r = new Rect2(c.GetGlobalPosition(), c.Size);
+				if (r.HasPoint(viewportPos))
+				{
+					return true;
+				}
+			}
+		}
+		catch { }
+		return false;
+	}
+
+	private void OnWindowInputForComponents(InputEvent ev)
+	{
+		try
+		{
+			if (!_timeStopOn || ev == null || ev.IsEcho())
+			{
+				return;                    // 非时停 ⇒ 游戏自己的 `_Input` 在处理
+			}
+
+			InputEvent forwarded = null;
+			if (ev is InputEventScreenTouch t)
+			{
+				var e2 = new InputEventScreenTouch();
+				e2.Index = t.Index;
+				e2.Pressed = t.Pressed;
+				e2.Position = WindowToViewport(t.Position);
+				e2.DoubleTap = t.DoubleTap;
+				forwarded = e2;
+			}
+			else if (ev is InputEventScreenDrag d)
+			{
+				var e2 = new InputEventScreenDrag();
+				e2.Index = d.Index;
+				e2.Position = WindowToViewport(d.Position);
+				e2.Relative = d.Relative;      // 相对量不做平移变换（组件仅用于惯性参考）
+				e2.Velocity = d.Velocity;
+				forwarded = e2;
+			}
+			else if (ev is InputEventMouseButton mb && mb.ButtonIndex == MouseButton.Left)
+			{
+				var e2 = new InputEventMouseButton();
+				e2.ButtonIndex = mb.ButtonIndex;
+				e2.Pressed = mb.Pressed;
+				e2.Position = WindowToViewport(mb.Position);
+				e2.GlobalPosition = e2.Position;
+				e2.DoubleClick = false;
+				forwarded = e2;
+			}
+			else if (ev is InputEventMouseMotion mm)
+			{
+				var e2 = new InputEventMouseMotion();
+				e2.Position = WindowToViewport(mm.Position);
+				e2.GlobalPosition = e2.Position;
+				e2.Relative = mm.Relative;
+				forwarded = e2;
+			}
+			if (forwarded == null)
+			{
+				return;
+			}
+
+			Vector2 vpPos = (forwarded is InputEventMouse me) ? me.Position
+				: (forwarded is InputEventScreenTouch st) ? st.Position
+				: (forwarded as InputEventScreenDrag)?.Position ?? Vector2.Zero;
+			if (IsOverModButton(vpPos))
+			{
+				return;                    // 点的是自家按钮 ⇒ 不指挥加农炮
+			}
+			ForwardToMousePressComponents(forwarded);
+		}
+		catch (Exception ex)
+		{
+			if (_diagCannonRelay < 3)
+			{
+				_diagCannonRelay++;
+				Warn("加农炮输入中继异常：" + ex.Message);
+			}
+		}
+	}
+
+	private int _diagCannonRelay;
+
+	/// <summary>把事件转发给场上所有 `MousePressComponent`（命中判定组件自己做）。</summary>
+	private void ForwardToMousePressComponents(InputEvent ev)
+	{
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				return;
+			}
+			if (_mpiMousePressInput == null)
+			{
+				_mpiMousePressInput = typeof(MousePressComponent).GetMethod(
+					"ProcessInput",
+					System.Reflection.BindingFlags.NonPublic
+					| System.Reflection.BindingFlags.Instance
+					| System.Reflection.BindingFlags.DeclaredOnly);
+				if (_mpiMousePressInput == null)
+				{
+					Warn("反射拿不到 MousePressComponent.ProcessInput（游戏更新了？）");
+					return;
+				}
+			}
+
+			// 角色列表按帧缓存（鼠标移动事件频率高于帧率，避免每次都重新收集）
+			// ⚠️ `SceneTree.GetFrame()` 在本版本返回 long，不是 ulong
+			long frame = (_tree != null && GodotObject.IsInstanceValid(_tree)) ? _tree.GetFrame() : 0;
+			if (_cachedCharacters == null || _cachedCharFrame != frame)
+			{
+				_cachedCharacters = mgr.GetCharacter();
+				_cachedCharFrame = frame;
+			}
+			if (_cachedCharacters == null)
+			{
+				return;
+			}
+
+			object[] args = new object[] { ev };
+			foreach (Variant item in _cachedCharacters)
+			{
+				if (!(item.AsGodotObject() is TowerDefenseCharacter ch)
+					|| !GodotObject.IsInstanceValid(ch) || !ch.inGame)
+				{
+					continue;
+				}
+				ComponentManager cm = ch.componentManager;
+				if (cm == null || !GodotObject.IsInstanceValid(cm))
+				{
+					continue;
+				}
+				MousePressComponent mpc = cm.GetRuntime<MousePressComponent>();
+				// ⚠️ CharacterComponentRuntime 不是 GodotObject，只能用 IsReleased 判有效性
+				if (mpc == null || mpc.IsReleased)
+				{
+					continue;
+				}
+				try
+				{
+					_mpiMousePressInput.Invoke(mpc, args);
+				}
+				catch (Exception ex)
+				{
+					if (_diagCannonRelay < 6)
+					{
+						_diagCannonRelay++;
+						Warn("转发组件输入失败：" + ex.Message);
+					}
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			if (_diagCannonRelay < 9)
+			{
+				_diagCannonRelay++;
+				Warn("收集组件异常：" + ex.Message);
+			}
+		}
 	}
 }
