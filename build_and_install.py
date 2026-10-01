@@ -21,19 +21,37 @@ import os
 import shutil
 import subprocess
 import sys
+# --- 本机路径适配（自动注入；换机器只改 mods/_modenv.py）---
+import os as _os
+import sys as _sys
 
-ROOT = r"C:\Users\txgcs\WorkBuddy\zjb"
-DOTNET = os.path.join(ROOT, "tools", "dotnet9", "dotnet.exe")
-BASE = os.path.join(ROOT, "mod", "TimeStop")
+_MROOT = _os.path.dirname(_os.path.abspath(__file__))
+while not _os.path.isfile(_os.path.join(_MROOT, "_modenv.py")):
+    _p = _os.path.dirname(_MROOT)
+    if _p == _MROOT:
+        break
+    _MROOT = _p
+if _MROOT not in _sys.path:
+    _sys.path.insert(0, _MROOT)
+from _modenv import (  # noqa: E402
+    MODS_ROOT, WORKSPACE, REF_DIR, GAME, UNPACK, UD, MODS_DIR, CACHE,
+    PY, DOTNET, DOTNET_ROOT, require_ref_dir, ensure_mods, describe,
+)
+# --- 适配块结束 ---
+
+# 原为作者的 WorkBuddy 工程根；现在指向本工作区的 mods/ 根
+ROOT = MODS_ROOT
+DOTNET = DOTNET
+BASE = _os.path.dirname(_os.path.abspath(__file__))   # ← 本 Mod 自己的目录
 SRC = os.path.join(BASE, "runtime_src")
-PY = r"C:\Users\txgcs\.workbuddy\binaries\python\versions\3.13.12\python.exe"
+PY = PY
 LOG = os.path.join(SRC, "build_last.log")
 
-HOME = os.path.join(ROOT, "tools", "dotnet_home")
+HOME = os.path.join(WORKSPACE, ".cache", "dotnet_home")
 TMPD = os.path.join(HOME, "tmp")
-NUGET = os.path.join(ROOT, "tools", "nuget")
+NUGET = os.path.join(WORKSPACE, ".cache", "nuget")
 
-UD = r"C:\Users\txgcs\AppData\Roaming\Godot\app_userdata\植物大战僵尸杂交版"
+UD = UD
 MODS = os.path.join(UD, "Mods")
 CACHE = os.path.join(UD, "ModsCache")
 
@@ -48,7 +66,7 @@ def run_compile():
     for d in (HOME, TMPD, NUGET):
         os.makedirs(d, exist_ok=True)
     env = dict(os.environ)
-    env["DOTNET_ROOT"] = os.path.join(ROOT, "tools", "dotnet9")
+    env["DOTNET_ROOT"] = DOTNET_ROOT   # ← mods/_modenv.py 从 dotnet.exe 反推
     env["DOTNET_CLI_HOME"] = HOME
     env["TEMP"] = TMPD
     env["TMP"] = TMPD
@@ -59,8 +77,22 @@ def run_compile():
     env["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1"
     env["MSBUILDDISABLENODEREUSE"] = "1"
 
-    cmd = [DOTNET, "build", "-c", "Release", "--no-restore",
+    # 本机适配（原命令写死为 `--no-restore`，且不带工程名/引用目录）：
+    #   · 必须显式传 -p:GodotRefDir=...，否则 csproj 里被清空的默认值会让
+    #     GodotSharp / PlantsVsZombies 引用解析不到，报一屏 CS0246。
+    #   · 去掉 --no-restore：本机 NUGET_PACKAGES 被重定向到工作区 .cache，
+    #     该目录是空的，不先 restore 就没有 project.assets.json。
+    # 工程文件名是「本 Mod 的名字」，不是子目录名 runtime_src。
+    _csproj = next((f for f in sorted(os.listdir(SRC)) if f.endswith(".csproj")), None)
+    if not _csproj:
+        log("[compile] %s 下找不到 .csproj" % SRC)
+        return False
+    cmd = [DOTNET, "build", os.path.join(SRC, _csproj),
+           "-c", "Release",
+           "-p:GodotRefDir=" + require_ref_dir(),
            "-p:UseSharedCompilation=false", "-m:1", "-nodeReuse:false", "-v:q", "-nologo"]
+    if not os.path.isfile(os.path.join(SRC, "obj", "project.assets.json")):
+        log("[compile] 无 obj/project.assets.json，先 restore")
     p = subprocess.run(cmd, cwd=SRC, env=env, capture_output=True, text=True,
                        encoding="utf-8", errors="replace", timeout=300)
     log("[compile] RC=%d" % p.returncode)
@@ -92,7 +124,7 @@ def main():
     log("[package] RC=%d" % p.returncode)
     log((p.stdout or "").strip())
 
-    dist = os.path.join(ROOT, "mod", "dist", "TimeStop.pmod")
+    dist = os.path.join(BASE, "dist", "TimeStop.pmod")
     if p.returncode != 0 or not os.path.isfile(dist):
         log("打包失败，终止。")
         return 1

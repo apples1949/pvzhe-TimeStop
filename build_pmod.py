@@ -12,11 +12,28 @@ import sys
 import zipfile
 import hashlib
 import shutil
+# --- 本机路径适配（自动注入；换机器只改 mods/_modenv.py）---
+import os as _os
+import sys as _sys
 
-BASE = r"C:/Users/txgcs/WorkBuddy/zjb/mod/TimeStop"
+_MROOT = _os.path.dirname(_os.path.abspath(__file__))
+while not _os.path.isfile(_os.path.join(_MROOT, "_modenv.py")):
+    _p = _os.path.dirname(_MROOT)
+    if _p == _MROOT:
+        break
+    _MROOT = _p
+if _MROOT not in _sys.path:
+    _sys.path.insert(0, _MROOT)
+from _modenv import (  # noqa: E402
+    MODS_ROOT, WORKSPACE, REF_DIR, GAME, UNPACK, UD, MODS_DIR, CACHE,
+    PY, DOTNET, require_ref_dir, ensure_mods, describe,
+)
+# --- 适配块结束 ---
+
+BASE = _os.path.dirname(_os.path.abspath(__file__))   # ← 本 Mod 自己的目录
 RUNTIME = os.path.join(BASE, "Runtime")
 BINSRC = os.path.join(BASE, "runtime_src", "bin", "Release", "JTYTimeStop.dll")
-OUT_DIR = r"C:/Users/txgcs/WorkBuddy/zjb/mod/dist"
+OUT_DIR = _os.path.join(BASE, "dist")   # ← 产物落在本 Mod 的 dist/
 OUT = os.path.join(OUT_DIR, "TimeStop.pmod")
 
 

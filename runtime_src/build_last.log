@@ -2,16 +2,11 @@
 0 个警告
     0 个错误
 
-已用时间 00:00:07.92
+已用时间 00:00:01.55
 [compile] OK
 [package] RC=0
-[护栏0] Runtime/ModAssembly.dll 与最新编译产物不一致 → 自动用编译产物覆盖
-       编译产物 bin/Release: 321f2752add7a9288d8ed7b77356d98d
-       Runtime/ 原值      : 1342600b4d7bda1e31d558e4c43359a7
-       已更新 Runtime/ModAssembly.dll -> 321f2752add7a9288d8ed7b77356d98d
-OK -> C:/Users/txgcs/WorkBuddy/zjb/mod/dist\TimeStop.pmod
+OK -> C:\Users\apples1949\Desktop\植物大战僵尸杂交重制版\mods\TimeStop\dist\TimeStop.pmod
   大小: 18705 字节
   内容: ['mod.json', 'Runtime/ModAssembly.dll']
   包内 DLL md5: 321f2752add7a9288d8ed7b77356d98d （应与 bin/Release 及装机包一致）
-[install] C:\Users\txgcs\AppData\Roaming\Godot\app_userdata\植物大战僵尸杂交版\Mods\TimeStop.pmod (18705 B)
-[cache] move rc=0 移动了　        1 个目录。
+[install] C:\Users\apples1949\AppData\Roaming\Godot\app_userdata\植物大战僵尸杂交版\Mods\TimeStop.pmod (18705 B)
