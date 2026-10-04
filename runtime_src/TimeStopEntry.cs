@@ -127,6 +127,9 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	/// <summary>已报告过"找到齿轮"（避免刷屏）。</summary>
 	private bool _gearFoundReported;
 
+	/// <summary>"定位基准改锚到叠加控件"这条只报一次（v1.0.31）。</summary>
+	private bool _stackAnchorReported;
+
 	// ================================================================ 入口三回调
 
 	public void Initialize(XWModRuntimeContext context)
@@ -1583,6 +1586,9 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			ResetGearReport();
 			return;
 		}
+		// ★ v1.0.31：「加速」下方若已叠了别的 Mod 控件（如「双倍加速」勾选框），
+		//   改锚到**最下面那个** ⇒「时停」自动排到整摞控件下方，不会被夹在中间。
+		anchorBtn = FindLowestStackedControl(anchorBtn);
 		// 基准按钮还没布局好（尺寸为 0）时先不建，等下一轮
 		if (anchorBtn.Size.Y < 1f)
 		{
@@ -1630,7 +1636,7 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 
 			// 贴在基准按钮（加速）正下方
 			cb.GlobalPosition = new Vector2(anchorBtn.GlobalPosition.X,
-				anchorBtn.GlobalPosition.Y + anchorBtn.Size.Y + 6f);
+				AnchorVisualBottom(anchorBtn) + 6f);
 			cb.CustomMinimumSize = new Vector2(Mathf.Max(anchorBtn.Size.X, 72f), 0f);
 
 			_button = cb;
@@ -1686,8 +1692,10 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			{
 				return;
 			}
+			// ★ v1.0.31：同上 —— 锚到「加速」下方最底部的那个 Mod 控件
+			anchorBtn = FindLowestStackedControl(anchorBtn);
 			Vector2 want = new Vector2(anchorBtn.GlobalPosition.X,
-				anchorBtn.GlobalPosition.Y + anchorBtn.Size.Y + 6f);
+				AnchorVisualBottom(anchorBtn) + 6f);
 			if (_buttonHost.GlobalPosition.DistanceTo(want) > 2f)
 			{
 				_buttonHost.GlobalPosition = want;
@@ -1808,6 +1816,132 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 		return null;
 	}
 
+	/// <summary>
+	/// 锚点控件的**视觉底边 Y**（含 scale）。
+	///
+	/// ⚠️ 为什么不能用 `GlobalPosition.Y + Size.Y`：原版「加速」`CheckBox2X` 在 tscn 里带
+	///   `scale = 0.78`，它的**布局高是 64，但视觉高只有 64×0.78 ≈ 49.9**。
+	///   直接用布局高算，会让「时停」与上一件控件之间凭空多出 ~14px 空隙
+	///   （实测 20px，而本 Mod 与各加速框统一用的是 6px）⇒ 视觉上明显不整齐。
+	///
+	/// ★ v1.0.31 起统一用本函数 ⇒ 整摞控件的间距都是 6px。
+	/// </summary>
+	private static float AnchorVisualBottom(Control c)
+	{
+		try
+		{
+			float s = c.Scale.Y;
+			if (s <= 0.01f)
+			{
+				s = 1f;
+			}
+			return c.GlobalPosition.Y + c.Size.Y * s;
+		}
+		catch { }
+		return c.GlobalPosition.Y + c.Size.Y;
+	}
+
+	/// <summary>
+	/// ★ v1.0.31：「加速」下方若已经叠了**别的 Mod 自建控件**（典型例子：「双倍加速」勾选框），
+	/// 就锚到**最下面那个**，让「时停」排到整摞控件的下方，而不是被夹在中间。
+	///
+	/// 背景（用户 2026-10-01 要求"将两个加速框放上下一起"）：
+	///   「时停」原本固定锚在 `checkBox2X`（加速）正下方，于是「双倍加速」一放进同一区域，
+	///   三者就被挤成交错顺序。现在由「时停」主动让位。
+	///
+	/// 规则（**不依赖 Mod 加载顺序** —— 每帧重算，谁先创建都能收敛）：
+	///   · 只在锚点的**同一父节点**下找（加速与本 Mod 的控件都挂在 `GUITop` 这个 CanvasLayer 下）；
+	///   · 只要**可见的 `Control`**，且节点名以 `Mod` 开头
+	///     （本工程各 Mod 自建控件的共同前缀：`ModTimeStopButton`、`ModDoubleSpeedToggle`…）；
+	///   · **排除本 Mod 自己的节点**（名字含 `TimeStop`）—— 否则会锚到自己、
+	///     每帧把自己往下推，直接跑出屏幕；
+	///   · 必须在锚点**下方**且纵向贴近（同一摞，≤ 300px）、横向大致同列（≤ 120px）；
+	///   · 取其中**底边最低**的一个。
+	///
+	/// 找不到任何符合条件的控件时**原样返回**（退回"加速正下方"的老行为）。
+	/// </summary>
+	private Control FindLowestStackedControl(Control anchorBtn)
+	{
+		try
+		{
+			if (anchorBtn == null || !GodotObject.IsInstanceValid(anchorBtn))
+			{
+				return anchorBtn;
+			}
+			Node parent = anchorBtn.GetParent();
+			if (parent == null || !GodotObject.IsInstanceValid(parent))
+			{
+				return anchorBtn;
+			}
+			float anchorTop = anchorBtn.GlobalPosition.Y;
+			// ⚠️ 判定"在我下方"必须用**视觉底边**（含 scale），不能用布局尺寸：
+			//   「加速」在 tscn 里带 `scale = 0.78`，布局高 64 但视觉高只有 64×0.78 ≈ 49.9。
+			//   别的 Mod 通常是按**视觉底边 + 间隙**往下摆的（例如「双倍加速」放在
+			//   64 + 49.9 + 6 ≈ 119.9），若这里仍用 64 + 64 = 128 当底边，
+			//   那些控件会被判成"在加速之上"而**整个过滤掉** ⇒ 新逻辑完全失效、时停仍被夹在中间。
+			float anchorScaleY = 1f;
+			try
+			{
+				anchorScaleY = anchorBtn.Scale.Y;
+			}
+			catch { }
+			if (anchorScaleY <= 0.01f)
+			{
+				anchorScaleY = 1f;
+			}
+			float anchorBottom = anchorTop + anchorBtn.Size.Y * anchorScaleY;
+			float anchorX = anchorBtn.GlobalPosition.X;
+
+			Control best = anchorBtn;
+			float bestBottom = anchorBottom;
+			int n = parent.GetChildCount();
+			for (int i = 0; i < n; i++)
+			{
+				if (!(parent.GetChild(i) is Control c) || !GodotObject.IsInstanceValid(c))
+				{
+					continue;
+				}
+				if (c == anchorBtn || !c.Visible)
+				{
+					continue;
+				}
+				string nm = c.Name.ToString();
+				if (!nm.StartsWith("Mod", StringComparison.Ordinal))
+				{
+					continue;
+				}
+				if (nm.IndexOf("TimeStop", StringComparison.Ordinal) >= 0)
+				{
+					continue;   // 自己的节点，绝不能锚到自己
+				}
+				float top = c.GlobalPosition.Y;
+				if (top < anchorBottom - 4f || top > anchorBottom + 300f)
+				{
+					continue;   // 不在"加速下方这一摞"里
+				}
+				if (Math.Abs(c.GlobalPosition.X - anchorX) > 120f)
+				{
+					continue;   // 横向不同列
+				}
+				float bottom = top + c.Size.Y;
+				if (bottom > bestBottom)
+				{
+					bestBottom = bottom;
+					best = c;
+				}
+			}
+			if (best != anchorBtn && !_stackAnchorReported)
+			{
+				_stackAnchorReported = true;
+				Info("定位基准改锚到叠加控件：" + best.Name
+					+ "（其下方才是「时停」）底边=" + bestBottom.ToString("0.#"));
+			}
+			return best;
+		}
+		catch { }
+		return anchorBtn;
+	}
+
 	private void ReportAnchor(Control c, string desc)
 	{
 		if (!_gearFoundReported)
@@ -1878,7 +2012,7 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			Vector2 aPos = anchorBtn.GlobalPosition;
 			Vector2 aSize = anchorBtn.Size;
 			// 竖直方向留 6px 间隙；水平与基准按钮居中对齐
-			pc.GlobalPosition = new Vector2(aPos.X, aPos.Y + aSize.Y + 6f);
+			pc.GlobalPosition = new Vector2(aPos.X, AnchorVisualBottom(anchorBtn) + 6f);
 			pc.CustomMinimumSize = new Vector2(Mathf.Max(aSize.X, 72f), 0f);
 			pc.ZIndex = 200;
 
