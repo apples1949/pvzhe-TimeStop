@@ -1,2 +1,0 @@
-C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStopEntry.cs(648,28): error CS1061: “CanvasLayer”未包含“GetCanvasTransform”的定义，并且找不到可接受第一个“CanvasLayer”类型参数的可访问扩展方法“GetCanvasTransform”(是否缺少 using 指令或程序集引用?) [C:\Users\txgcs\WorkBuddy\zjb\mod\TimeStop\runtime_src\TimeStop.csproj]
-EXIT=127

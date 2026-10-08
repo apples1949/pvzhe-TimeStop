@@ -45,7 +45,7 @@ DOTNET = DOTNET
 BASE = _os.path.dirname(_os.path.abspath(__file__))   # ← 本 Mod 自己的目录
 SRC = os.path.join(BASE, "runtime_src")
 PY = PY
-LOG = os.path.join(SRC, "build_last.log")
+LOG = os.path.join(WORKSPACE, ".cache", "build_logs", "timestop_build_last.log")
 
 HOME = os.path.join(WORKSPACE, ".cache", "dotnet_home")
 TMPD = os.path.join(HOME, "tmp")
@@ -170,6 +170,7 @@ if __name__ == "__main__":
         log("EXC: %r" % e)
         log(traceback.format_exc())
         rc = 1
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
     with open(LOG, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     print("\n".join(lines))
