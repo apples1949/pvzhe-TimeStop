@@ -65,7 +65,7 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	/// 只有一条路径，最省心）。功能上两者完全等价。
 	/// 改这个值需要重新编译打包。
 	/// </summary>
-	private static readonly bool UseButtonStyle = true;
+	private static readonly bool UseButtonStyle = true;   // ★ 当前 = 绿框形态（PanelContainer+Label）；置 false 可切到复选框形态
 
 	/// <summary>扫描节流：每 N 帧扫一次全树（找齿轮按钮 + 维持时停状态）。</summary>
 	private const int ScanStride = 6;
@@ -1632,6 +1632,18 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 				MouseDefaultCursorShape = Control.CursorShape.PointingHand,
 			};
 			cb.Toggled += OnTimeStopToggled;
+			// ★ v1.0.32（用户要求）：文字/样式与游戏自带「加速」按钮**同一大小**。
+			//   ⚠️ 不能直接抄它的 `scale = 0.78`：本 Mod 的命中判定用的是
+			//      `_buttonHost.GlobalPosition + Size`（**layout 矩形，不含 scale**，
+			//      见 PollClick / IsInsideButton）⇒ 加了 scale 会出现"能点到的范围比看到的大"。
+			//   所以按**等效字号**对齐：加速按钮 font_size 24 × scale 0.78 ≈ 18.7
+			//      ⇒ 这里取 18、描边按 5 × 0.78 ≈ 4。
+			try
+			{
+				cb.AddThemeFontSizeOverride("font_size", 18);
+				cb.AddThemeConstantOverride("outline_size", 4);
+			}
+			catch { }
 			parent.AddChild(cb, false, Node.InternalMode.Disabled);
 
 			// 贴在基准按钮（加速）正下方
@@ -1915,9 +1927,15 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 					continue;   // 自己的节点，绝不能锚到自己
 				}
 				float top = c.GlobalPosition.Y;
-				if (top < anchorBottom - 4f || top > anchorBottom + 300f)
+				// ★ v1.0.33 修正（用户反馈"与时停 Mod 冲突"）：
+				//   下界原来卡在**加速的底边**（anchorBottom - 4），但有些 Mod 是用
+				//   **自绘控件替换掉加速复选框**的 —— 它的顶边和加速**一样高**（top == anchorTop），
+				//   于是被这条过滤掉 ⇒ 时停看不到它，仍按"加速正下方"摆 ⇒ **压在它身上**。
+				//   ⇒ 放宽到"加速**顶边**"：与加速同排、或更靠下的 Mod 控件都算"同一摞"。
+				//   （变矮/变高都能自适应；横向同列与 300px 纵深限制保持不变。）
+				if (top < anchorTop - 4f || top > anchorBottom + 300f)
 				{
-					continue;   // 不在"加速下方这一摞"里
+					continue;   // 不在"加速这一摞"里
 				}
 				if (Math.Abs(c.GlobalPosition.X - anchorX) > 120f)
 				{
@@ -1974,8 +1992,10 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			lb.VerticalAlignment = VerticalAlignment.Center;
 			lb.AddThemeColorOverride("font_color", GreenColor);
 			lb.AddThemeColorOverride("font_outline_color", new Color(0, 0, 0, 1));
-			lb.AddThemeConstantOverride("outline_size", 5);
-			lb.AddThemeFontSizeOverride("font_size", 22);
+			// ★ v1.0.32（用户要求）：与游戏自带「加速」按钮**同一大小**
+			//   （加速是 font_size 24 × scale 0.78 ≈ 18.7 ⇒ 这里取 18、描边 4）
+			lb.AddThemeConstantOverride("outline_size", 4);
+			lb.AddThemeFontSizeOverride("font_size", 18);
 
 			// 圆角描边外框（给 PanelContainer 画）
 			StyleBoxFlat sb = new StyleBoxFlat();
@@ -1983,10 +2003,11 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			sb.BorderColor = BorderGreen;
 			sb.SetBorderWidthAll(2);
 			sb.SetCornerRadiusAll(6);
-			sb.ContentMarginLeft = 10f;
-			sb.ContentMarginRight = 10f;
-			sb.ContentMarginTop = 3f;
-			sb.ContentMarginBottom = 3f;
+			// 内边距一并收紧，让整框高度贴近加速按钮那一行
+			sb.ContentMarginLeft = 8f;
+			sb.ContentMarginRight = 8f;
+			sb.ContentMarginTop = 1f;
+			sb.ContentMarginBottom = 1f;
 
 			PanelContainer pc = new PanelContainer();
 			pc.Name = ButtonName + "Panel";
