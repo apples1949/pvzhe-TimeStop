@@ -33,8 +33,11 @@ using PVZHE.ModEditor.ModSystem;
 /// Initialize / OnAllModsLoaded / Shutdown **一律不许抛**：
 /// 抛出去 → 整包无条件回滚（不受 runtimeAssemblyPolicy 保护）。三个回调全部 try/catch。
 /// </summary>
-public sealed class TimeStopEntry : IXWModRuntimeEntry
+public sealed partial class TimeStopEntry : IXWModRuntimeEntry
 {
+	// 赞助码注入器（SponsorQrInjector.cs 共享组件）用的包根缓存
+	internal static string SponsorQrRoot = null;
+
 	private const string LogPrefix = "[TimeStop] ";
 
 	/// <summary>自建「时停」按钮的节点名（幂等判断用）。</summary>
@@ -46,7 +49,7 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	/// `DIAG`/`PROBE`/`PICK`/`CLICK` 诊断已完成使命，定位到真因：暂停时 GUI 派发被门控）。
 	/// 需要再排查时把它改回 true 即可，所有诊断代码都保留。
 	/// </summary>
-	private static readonly bool EnableInfoLog = false;
+	private static bool EnableInfoLog;   // 由 Initialize 从「Mod 配置」读取（原为编译期常量）
 
 	/// <summary>★ v1.0.13 诊断开关：只输出"选卡 / 铲子 命中判定"相关的少量行
 	/// （每次点击最多 3 行，不刷屏）。与 <see cref="EnableInfoLog"/> 相互独立，
@@ -65,7 +68,22 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	/// 只有一条路径，最省心）。功能上两者完全等价。
 	/// 改这个值需要重新编译打包。
 	/// </summary>
-	private static readonly bool UseButtonStyle = true;   // ★ 当前 = 绿框形态（PanelContainer+Label）；置 false 可切到复选框形态
+	private static bool UseButtonStyle = true;   // 由「Mod 配置」的 style 项决定（restart 生效）
+		private const string KStyle = "style";
+		/// <summary>★ 2026-10-13（用户新需求）：时停开始后 N 秒自动解除；0 = 只能手动解除。</summary>
+		private const string KAutoResume = "autoResumeSec";
+		private static int _autoResumeSec;
+		/// <summary>本次时停的"预定自动解除"到点时刻（ms）；0 = 没有预定。</summary>
+		private static ulong _autoResumeDeadlineMs;
+
+	/// <summary>位置模式：auto = 自动排在加速下方（默认）；custom = 用下面的绝对坐标。</summary>
+		private const string KPositionMode = "positionMode";
+		private const string KCustomX = "customX";
+		private const string KCustomY = "customY";
+		private static bool _posCustom;
+		private static int _posX = 1;    // ★ 2026-10-13：改为百分比（0~100）
+		private static int _posY = 33;
+   // ★ 当前 = 绿框形态（PanelContainer+Label）；置 false 可切到复选框形态
 
 	/// <summary>扫描节流：每 N 帧扫一次全树（找齿轮按钮 + 维持时停状态）。</summary>
 	private const int ScanStride = 6;
@@ -108,6 +126,14 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 
 	/// <summary>时停是否处于激活状态（用户点开）。</summary>
 	private bool _timeStopOn;
+	/// <summary>配置变化订阅标志（v1.0.37 样式热更新）。</summary>
+	private bool _settingsSubscribed;
+
+	/// <summary>一键开关时停的快捷键（配置面板可改，默认 T）。</summary>
+	private const string KToggleHotkey = "toggleHotkey";
+	private Callable _hotkeyTick;
+	private bool _hotkeyPrev;
+	private bool _hotkeyConnected;
 
 	/// <summary>自建的按钮 Label（找到齿轮后创建；齿轮重建则重新创建）。</summary>
 	/// <summary>★ v1.0.25：类型放宽为 `Control` —— 按钮形态下是 `Label`，勾选框形态下是 `CheckBox`。</summary>
@@ -132,15 +158,64 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 
 	// ================================================================ 入口三回调
 
-	public void Initialize(XWModRuntimeContext context)
+	
+	// ============================================================ 配置面板接线
+	//
+	// mod.json 里声明了 enableLog（bool，默认 false）。
+	// 这里在 Initialize 读一次 —— 老宿主没有 context.Settings 时吞异常、按 false 处理。
+	// 用 Get<object> 而不是 Get<bool>：宿主把值存成 Dictionary<string, object>，
+	// 直接 Get<bool> 可能抛 InvalidCastException。
+
+	private static bool ReadLogSetting(XWModRuntimeContext context)
 	{
+		try
+		{
+			if (context == null)
+			{
+				return false;
+			}
+			object v = context.Settings.Get<object>("enableLog");
+			if (v is bool b)
+			{
+				return b;
+			}
+			if (v is string s && bool.TryParse(s, out bool sb))
+			{
+				return sb;
+			}
+			if (v is System.Text.Json.JsonElement je)
+			{
+				if (je.ValueKind == System.Text.Json.JsonValueKind.True) { return true; }
+				if (je.ValueKind == System.Text.Json.JsonValueKind.False) { return false; }
+			}
+			return false;
+		}
+		catch
+		{
+			return false;
+		}
+	}
+
+public void Initialize(XWModRuntimeContext context)
+	{
+		try
+		{
+			SponsorQrRoot = context.PackageRoot;
+		}
+		catch { }
+		// 先定日志开关，再读卡槽配置（否则 LoadPanelCfg 里的 Info 会被开关吞掉）
+		EnableInfoLog = false;   // ★ 2026-10-14 用户要求：默认关闭所有日志（原：EnableInfoLog = ReadLogSetting(context)）
+		// ★ v1.1.0：加载"16 卡槽触发"勾选状态（user://TimeStop.cfg）
+		LoadPanelCfg();
+
 		try
 		{
 			_context = context;
 			_frame = 0;
 			_faultReported = false;
 			string root = (context == null) ? "<null>" : context.PackageRoot;
-			Info("初始化完成；PackageRoot=" + root + "。将在「加速」按钮正下方创建「时停」开关。");
+			Info("初始化完成；PackageRoot=" + root + "。将在「加速」按钮正下方创建「时停」开关；"
+				+ "v1.1.0 另加「16 卡槽触发面板」。" + DescribeTriggerSlots() + " 已勾选。");
 		}
 		catch (Exception ex)
 		{
@@ -157,6 +232,30 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 				return;
 			}
 			_tree = Engine.GetMainLoop() as SceneTree;
+			// 快捷键：独立一条 process_frame 连接，不干扰主循环
+			try
+			{
+				if (_tree != null && !_hotkeyConnected)
+				{
+					_hotkeyTick = Callable.From(new Action(OnHotkeyTick));
+					_tree.Connect("process_frame", _hotkeyTick);
+					_hotkeyConnected = true;
+					ApplyStyleSetting();   // 面板里的样式
+			try
+			{
+				if (_context?.Settings != null && !_settingsSubscribed)
+				{
+					_context.Settings.Changed += OnSettingsChangedHot;
+					_settingsSubscribed = true;
+				}
+			}
+			catch { }
+					ApplyPositionSetting();   // 位置设置（immediate）
+					ApplyAutoResumeSetting();  // ★ 自动解除时停秒数
+					Info("时停快捷键已挂载：" + ReadHotkey());
+				}
+			}
+			catch { }
 			if (_tree == null)
 			{
 				Warn("拿不到 SceneTree，时停不会生效（游戏其余部分不受影响）。");
@@ -182,10 +281,12 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 
 	public void Shutdown()
 	{
+		try { ResumeAfterPanel(); } catch { }   // ★ 卸载时务必解除面板暂停（否则游戏卡在暂停树）
 		try
 		{
 			// 退出前必须先解除时停，否则会把整个游戏卡住
 			Disengage("Shutdown");
+			ShutdownPanel();   // ★ v1.1.0：销毁时停面板控件
 			UnhookWindowInput();
 			if (_connected && _tree != null && GodotObject.IsInstanceValid(_tree))
 			{
@@ -384,8 +485,34 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 
 	private void OnProcessFrame()
 	{
+		try { SponsorQrInjector.Tick(Engine.GetMainLoop() as SceneTree, "时停", SponsorQrRoot, "Resources/SponsorQR.png"); } catch { }
+		// ★ v1.0.36：快捷键录制面板（配置页「录制快捷键」按钮进入；无面板呼出键）
 		try
 		{
+			KeybindPanelManager.Tick(_tree, "时停", "时停", SponsorQrRoot ?? (_context?.PackageRoot ?? ""),
+				KToggleHotkey, ParseKeySetting(ReadHotkey()), ReadHotkeyOrEmpty(),
+				key => WriteHotkeySetting(key));
+			// ★ v1.1.0：**同一个 Mod 的第二个快捷键** —— 「时停面板呼出键」。
+			//   配置页会出现第二个「录制快捷键」按钮（锚 = Reset_panelHotkey）。
+			//   ⚠️ 这依赖 KeybindPanelManager v2.9 的"按 key 各自计数"修复：旧版是全局
+			//      `++_tick % 30`，同一帧被调两次时一个调用点恒为奇数 ⇒ 永远注不出按钮。
+			KeybindPanelManager.Tick(_tree, "时停", "时停面板", SponsorQrRoot ?? (_context?.PackageRoot ?? ""),
+				KPanelHotkey, ParseKeySetting(ReadPanelHotkey()), ReadPanelHotkey(),
+				key => WritePanelHotkeySetting(key));
+		// 注：面板保存后配置页下拉在重新打开时同步（宿主 UI 无外部刷新 API）
+		}
+		catch (Exception ex) { try { GD.PrintErr("[TimeStop] 键位面板异常：" + ex.Message); } catch { } }
+		try
+		{
+			// ★★ v1.1.0：时停面板 + 卡槽触发看门狗 —— **每帧**跑，不受下面 ScanStride 限制。
+			//   为什么不能并进 6 帧一次的扫描：10FPS 时 ScanStride=6 ⇒ 每 600ms 才看一次卡槽，
+			//   而"种植 CD 结束"是毫秒级事件，晚 0.6 秒才发现就失去意义了。
+			//   （每帧只读 16 个卡片的两个字段，开销可忽略。）
+			Node proot = (_tree != null && GodotObject.IsInstanceValid(_tree)) ? _tree.Root : null;
+			if (proot != null)
+			{
+				PanelTick(proot);
+			}
 			_frame++;
 			if (_frame % ScanStride != 0)
 			{
@@ -412,10 +539,34 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 
 			// 3) 维持时停状态（游戏自己可能改 Paused，例如失焦自动暂停；这里每轮校正）
 			MaintainTimeStop();
+			CheckAutoResume();   // ★ 自动解除时停到点检查
+			MaintainPanelPause();   // ★ 2026-10-13：面板暂停也要每帧维持（否则会被改回）
 
 			// 4) 时停期间：不断补充保活"新掉落的阳光/金币"（它们挂在 CharacterNode 下，
 			//    掉落物自己的 _Input 必须 Always 才收得到点击）
 			MaintainDroppableKeepAlive();
+
+			// 5) ★ v1.1.0：战斗设置页（BattleOption）兜底入口 —— 未设面板快捷键时注入按钮。
+			//    对话框每次打开都是新实例，所以每轮都查一次（幂等，靠 OptBtnName 去重）。
+			//    ⚠️ 这次是**全树搜索**，只在"确实有对话框打开"时才做：BattleOption.tscn 的
+			//       `pasue = true` ⇒ 打开设置页会把 `_tree.Paused` 置真，正好当廉价判据。
+			//       平时（未暂停）零开销。
+			try
+			{
+				// 先同步"设置页兜底按钮"的显隐（面板快捷键被设/被清空时都要跟着变）
+				SyncOptionButtonVisibility();
+				bool dialogLikelyOpen = _tree != null && GodotObject.IsInstanceValid(_tree) && _tree.Paused;
+				if (dialogLikelyOpen)
+				{
+					var opts = new List<Node>();
+					CollectByNameContains(root, 0, new string[] { "BattleOption" }, opts, 4);
+					foreach (Node opt in opts)
+					{
+						TryInjectOptionButton(opt);
+					}
+				}
+			}
+			catch { }
 		}
 		catch (Exception ex)
 		{
@@ -569,6 +720,17 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	{
 		try
 		{
+			// ★ v1.1.0：鼠标停在时停面板上时不驱动种植 —— `ProcessInput` 会按落点种下去，
+			//   而面板是"配置界面"，不该顺手在战场上种一棵（面板自身 MouseFilter=Stop 只能
+			//   挡住 GUI 派发，挡不住这里的手工驱动）。
+			{
+				Viewport pvp = (_tree != null && GodotObject.IsInstanceValid(_tree) && _tree.Root != null)
+					? _tree.Root.GetViewport() : null;
+				if (pvp != null && IsOverPanel(pvp.GetMousePosition()))
+				{
+					return;
+				}
+			}
 			// `TowerDefenseBattleFeatureMap` 不是 Node（是 Resource/GodotObject），
 			// 只能通过 `TowerDefenseManager.GetMapFeature()` 拿。
 			object mapFeature = TryGetMapFeatureViaManager();
@@ -848,6 +1010,13 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 
 			Viewport vp = _tree.Root.GetViewport();
 			Vector2 vpMouse = (vp != null) ? vp.GetMousePosition() : Vector2.Zero;
+			// ★ v1.1.0：点击落在时停面板上 ⇒ 这次点击归面板（勾复选框），
+			//   不进卡槽/铲子判定 —— 本 Mod 的选卡是**手工命中测试**、绕过 GUI 派发，
+			//   不挡的话"点复选框"会顺带把下面那张卡选中/取消。
+			if (IsOverPanel(vpMouse))
+			{
+				return;
+			}
 			bool diag = EnablePickDiag && _pickClickDiag++ < 40;
 			if (diag)
 			{
@@ -973,6 +1142,8 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	/// 用 GD.Print 直出，不被日志总开关吞掉）。</summary>
 	private void PickDiag(string msg)
 	{
+		if (!EnableInfoLog) { return; }
+		// ★ 2026-10-14：该输出原先绕过日志开关，现统一受 enableLog 控制
 		if (!EnablePickDiag)
 		{
 			return;
@@ -1539,7 +1710,17 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			{
 				return false;
 			}
-			Node ctl = FindNodeByClassName(root, "TowerDefenseControlNew");
+			// ★ 性能（2026-10-12）：`FindNodeByClassName` 是**整树递归 + 逐节点反射类型名**，
+			//   而本方法被 EnsureButton 每 6 帧调一次（≈10 次/秒；安卓上每次 3~5ms）。
+			//   关卡根节点在整局里不变 ⇒ 缓存 + 30 帧复查，行为等价。
+			Node ctl = _ctlNewCache;
+			ulong f = Engine.GetProcessFrames();
+			if (ctl == null || !GodotObject.IsInstanceValid(ctl) || f - _ctlNewCacheFrame >= 30UL)
+			{
+				_ctlNewCacheFrame = f;
+				ctl = FindNodeByClassName(root, "TowerDefenseControlNew");
+				_ctlNewCache = ctl;
+			}
 			if (ctl == null || !GodotObject.IsInstanceValid(ctl))
 			{
 				return false;
@@ -1661,6 +1842,33 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 		}
 	}
 
+
+	/// <summary>
+	/// ★ v1.0.37：配置变化热处理 —— style 改动 ⇒ 拆旧按钮/勾选框，下一轮按新样式重建（免重启）。
+	/// </summary>
+	private void OnSettingsChangedHot(System.Collections.Generic.IReadOnlyList<string> keys)
+	{
+		try
+		{
+			if (keys == null) { return; }
+			bool styleChanged = false;
+			foreach (string k in keys)
+			{
+				if (k == "style") { styleChanged = true; break; }
+			}
+			if (styleChanged)
+			{
+				ApplyStyleSetting();
+				if (_button != null && GodotObject.IsInstanceValid(_button)) { _button.QueueFree(); }
+				if (_buttonHost != null && GodotObject.IsInstanceValid(_buttonHost)) { _buttonHost.QueueFree(); }
+				_button = null;
+				_buttonHost = null;
+				Info("样式已热更新：" + (UseButtonStyle ? "按钮样式" : "复选框样式"));
+			}
+		}
+		catch (Exception ex) { try { GD.PushWarning("[TimeStop] 样式热更新失败：" + ex.Message); } catch { } }
+	}
+
 	/// <summary>勾选框切换回调（`Toggled` 信号）。</summary>
 	private void OnTimeStopToggled(bool pressed)
 	{
@@ -1706,7 +1914,20 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			}
 			// ★ v1.0.31：同上 —— 锚到「加速」下方最底部的那个 Mod 控件
 			anchorBtn = FindLowestStackedControl(anchorBtn);
-			Vector2 want = new Vector2(anchorBtn.GlobalPosition.X,
+			// 位置设置：自定义坐标时直接用绝对坐标，不走自动布局
+			// ★ 2026-10-13（用户要求）：自定义坐标改成**百分比**—— 不再随窗口大小变。
+			//   _posX/_posY 现在是 0~100 的百分比，按当前视口换算成像素。
+			Vector2 vpSz = new Vector2(1080f, 600f);
+			try
+			{
+				Vector2 vs = root.GetViewport()?.GetVisibleRect().Size ?? Vector2.Zero;
+				if (vs.X > 100f && vs.Y > 100f) { vpSz = vs; }
+			}
+			catch { }
+			Vector2 want = _posCustom
+				? new Vector2(vpSz.X * Mathf.Clamp(_posX, 0, 100) / 100f,
+					vpSz.Y * Mathf.Clamp(_posY, 0, 100) / 100f)
+				: new Vector2(anchorBtn.GlobalPosition.X,
 				AnchorVisualBottom(anchorBtn) + 6f);
 			if (_buttonHost.GlobalPosition.DistanceTo(want) > 2f)
 			{
@@ -2143,6 +2364,10 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 		return true;
 	}
 
+	/// <summary>★ 性能：缓存的关卡根节点（`TowerDefenseControlNew`）+ 上次查找的帧号。</summary>
+	private Node _ctlNewCache;
+	private ulong _ctlNewCacheFrame;
+
 	/// <summary>最近一次成功切换时停的时刻（`Time.GetTicksMsec()`）。</summary>
 	private ulong _lastToggleMsec;
 
@@ -2167,6 +2392,215 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	}
 
 	/// <summary>开启时停：冻结世界 + 保活交互层。</summary>
+	/// <summary>读取快捷键字符（默认 T）。</summary>
+	/// <summary>
+	/// 从「Mod 配置」读按钮样式：1 = 绿框（PanelContainer + Label），2 = 复选框（与加速同款 CheckBox）。
+	/// applyMode = restart ⇒ 改完重启游戏生效（切换形态要重建节点，这样最稳）。
+	/// </summary>
+	/// <summary>
+	/// 读位置设置：auto = 沿用自动布局（排在加速下方）；custom = 用绝对坐标（像素，左上角为原点）。
+	/// immediate 模式 ⇒ 面板改完立即生效（ResyncPosition 每帧都用新值）。
+	/// </summary>
+	/// <summary>★ 读「自动解除时停（秒）」（0 = 只手动解除）。</summary>
+	private void ApplyAutoResumeSetting()
+	{
+		try
+		{
+			int v = ReadIntSetting(KAutoResume, _autoResumeSec);
+			if (v < 0) { v = 0; }
+			if (v > 600) { v = 600; }
+			_autoResumeSec = v;
+		}
+		catch { }
+	}
+
+	private void ApplyPositionSetting()
+	{
+		try
+		{
+			object v = (_context == null) ? null : _context.Settings.Get<object>(KPositionMode);
+			string s = null;
+			if (v is string str) { s = str; }
+			else if (v is System.Text.Json.JsonElement je)
+			{
+				if (je.ValueKind == System.Text.Json.JsonValueKind.String) { s = je.GetString(); }
+				else if (je.ValueKind == System.Text.Json.JsonValueKind.Number) { s = je.ToString(); }
+			}
+			if (!string.IsNullOrWhiteSpace(s))
+			{
+				s = s.Trim();
+				_posCustom = s.Equals("custom", StringComparison.OrdinalIgnoreCase) || s == "2";
+			}
+			_posX = ReadIntSetting(KCustomX, _posX);
+			_posY = ReadIntSetting(KCustomY, _posY);
+		}
+		catch { }
+	}
+
+	/// <summary>读整数配置（兼容 long / JsonElement / string）。</summary>
+	private int ReadIntSetting(string key, int fallback)
+	{
+		try
+		{
+			object v = (_context == null) ? null : _context.Settings.Get<object>(key);
+			if (v == null) { return fallback; }
+			if (v is System.Text.Json.JsonElement je)
+			{
+				if (je.ValueKind == System.Text.Json.JsonValueKind.Number && je.TryGetInt32(out int n)) { return n; }
+				if (je.ValueKind == System.Text.Json.JsonValueKind.String && int.TryParse(je.GetString(), out int ns)) { return ns; }
+				return fallback;
+			}
+			return Convert.ToInt32(v, System.Globalization.CultureInfo.InvariantCulture);
+		}
+		catch { return fallback; }
+	}
+
+
+	/// <summary>读了当前样式值（供设置页样式行回填）。</summary>
+	private string ReadStyleSetting()
+	{
+		try
+		{
+			object v = (_context == null) ? null : _context.Settings.Get<object>(KStyle);
+			if (v is string s) { return s; }
+			if (v is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.String) { return je.GetString(); }
+		}
+		catch { }
+		return "1";
+	}
+
+	/// <summary>★ 设置页样式行回调：写回配置 + 立即套用（与配置页双向同步）。</summary>
+	private void ApplyStyleFromEditor(string value)
+	{
+		try
+		{
+			try
+			{
+				var ch = new System.Collections.Generic.Dictionary<string, object>();
+				ch[KStyle] = value;
+				bool _ok = _context?.Settings?.TrySave(ch, out XWModSettingsSaveResult _res) ?? false;
+				try { Info("样式写配置 ok=" + _ok + " value=" + value); } catch { }
+			}
+			catch { }
+			ApplyStyleSetting();
+		}
+		catch { }
+	}
+
+	private void ApplyStyleSetting()
+	{
+		try
+		{
+			object v = (_context == null) ? null : _context.Settings.Get<object>(KStyle);
+			string s = null;
+			if (v is string str) { s = str; }
+			else if (v is System.Text.Json.JsonElement je)
+			{
+				if (je.ValueKind == System.Text.Json.JsonValueKind.String) { s = je.GetString(); }
+				else if (je.ValueKind == System.Text.Json.JsonValueKind.Number) { s = je.ToString(); }
+			}
+			if (string.IsNullOrWhiteSpace(s)) { return; }
+			s = s.Trim();
+			if (s == "1" || s.Equals("button", StringComparison.OrdinalIgnoreCase)) { UseButtonStyle = true; }
+			else if (s == "2" || s.Equals("checkbox", StringComparison.OrdinalIgnoreCase)) { UseButtonStyle = false; }
+		}
+		catch { }
+	}
+
+	/// <summary>快捷键配置字符串 → Key（空 = None；单字符 ASCII；多字符按枚举名）。</summary>
+	private static Key ParseKeySetting(string s)
+	{
+		try
+		{
+			if (string.IsNullOrWhiteSpace(s)) { return Key.None; }
+			s = s.Trim();
+			if (s.Length == 1)
+			{
+				int code = s[0];
+				if (code >= 32 && code <= 126) { return (Key)code; }
+				return Key.None;
+			}
+			if (Enum.TryParse(s, true, out Key k)) { return k; }
+			return Key.None;
+		}
+		catch { return Key.None; }
+	}
+
+	/// <summary>快捷键显示文本（空 = 无绑定）。</summary>
+	private string ReadHotkeyOrEmpty()
+	{
+		string s = ReadHotkey();
+		return string.IsNullOrWhiteSpace(s) ? "" : s;
+	}
+
+	/// <summary>把录到的键写回配置（toggleHotkey），立即生效。</summary>
+	private void WriteHotkeySetting(string keySetting)
+	{
+		try
+		{
+			if (_context?.Settings == null) { try { GD.PrintErr("[TimeStop] 配置不可用，快捷键未保存。"); } catch { } return; }
+			var changes = new System.Collections.Generic.Dictionary<string, object>();
+			changes[KToggleHotkey] = keySetting ?? "";
+			if (_context.Settings.TrySave(changes, out XWModSettingsSaveResult result))
+			{
+				Info("时停快捷键已保存：" + (string.IsNullOrEmpty(keySetting) ? "（无绑定）" : keySetting) + "（" + result.Message + "）");
+			}
+			else
+			{
+				try { GD.PrintErr("[TimeStop] 快捷键保存失败：" + result.Message); } catch { }
+			}
+		}
+		catch (Exception ex) { try { GD.PrintErr("[TimeStop] 快捷键保存异常：" + ex.Message); } catch { } }
+	}
+
+	private string ReadHotkey()
+	{
+		try
+		{
+			object v = _context == null ? null : _context.Settings.Get<object>(KToggleHotkey);
+			string s = null;
+			if (v is string str) { s = str; }
+			else if (v is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.String) { s = je.GetString(); }
+			if (!string.IsNullOrWhiteSpace(s)) { return s.Trim(); }
+		}
+		catch { }
+		return "";
+	}
+
+	/// <summary>
+	/// 快捷键一键开关时停。走与勾选框切换相同的入口 OnTimeStopToggled，保证行为一致。
+	/// ⚠️ 无源生成器 ⇒ 不能用 _Input；独立一条 process_frame 连接，不动原有主循环。
+	/// </summary>
+	private void OnHotkeyTick()
+	{
+		// ★ v1.1.0：面板呼出键（自己一条边沿，与下面"时停键"完全独立）
+		PanelHotkeyTick();
+		try
+		{
+			// ★ v1.0.37：任意键位录制会话期间暂停快捷键响应（防录到的键被其它轮询
+			//   当快捷键执行——实测：录 Q 到卡槽面板瞬间触发时停切换 ⇒ 界面假死）。
+			if (KeybindPanelManager.IsCapturing()) { _hotkeyPrev = false; return; }
+			string key = ReadHotkey();
+			if (string.IsNullOrEmpty(key)) { return; }
+			// ★ v1.1.0 修：原来取 `key[0]` 转 Key —— 对单字符（A/Z/5）碰巧正确，
+			//   但对枚举名键（VolumeUp / Pageup / F11 …）会退化成首字母
+			//   （录"手机音量+"实际轮询的是字母 V）⇒ 改用既有的 ParseKeySetting，
+			//   单字符与枚举名两条路都对。
+			Key hk = ParseKeySetting(key);
+			if (hk == Key.None) { return; }
+			bool down = false;
+			try { down = Input.IsKeyPressed(hk); } catch { }
+			if (down && !_hotkeyPrev)
+			{
+				bool want = !_timeStopOn;
+				Info("快捷键 " + key + " 切换时停 → " + (want ? "开" : "关"));
+				OnTimeStopToggled(want);
+			}
+			_hotkeyPrev = down;
+		}
+		catch { }
+	}
+
 	private void Engage()
 	{
 		try
@@ -2177,12 +2611,17 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 			}
 			_savedTreePaused = _tree.Paused;
 			_timeStopOn = true;
+			// ★ 新需求：按设定秒数登记"预定自动解除"；0 = 不登记（只能手动解除）
+			_autoResumeDeadlineMs = (_autoResumeSec > 0)
+				? (Time.GetTicksMsec() + (ulong)(_autoResumeSec * 1000)) : 0UL;
 
 			// 保活：把交互相关节点设为 Always（暂停后仍响应输入）
 			ApplyKeepAlive();
 
 			// 冻结
 			_tree.Paused = true;
+			UpdateButtonVisual();   // ★ v1.0.38：快捷键路径也刷新按钮红/绿视觉
+			SyncCheckBoxState();    // ★ v1.0.38：复选框勾选态同步（快捷键切换时复选框显示正确）
 			Info("时停已开启：PhyFrame 冻结。保活节点 " + _keptAlive.Count + " 个。");
 		}
 		catch (Exception ex)
@@ -2198,11 +2637,14 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 		try
 		{
 			_timeStopOn = false;
+			_autoResumeDeadlineMs = 0UL;   // ★ 取消预订的自动解除（下次触发时停会重新计时）
 			RestoreKeepAlive();
 			if (_tree != null && GodotObject.IsInstanceValid(_tree))
 			{
 				_tree.Paused = _savedTreePaused;
 			}
+			UpdateButtonVisual();   // ★ v1.0.38：快捷键路径也刷新按钮红/绿视觉
+			SyncCheckBoxState();    // ★ v1.0.38：复选框勾选态同步
 			Info("时停已解除（" + reason + "）。");
 		}
 		catch (Exception ex)
@@ -2212,6 +2654,19 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	}
 
 	/// <summary>维持时停：每轮校正 Paused（游戏可能因失焦等自行改动）。</summary>
+	/// <summary>★ 到点自动解除时停（设定秒数用尽时）。手动解除会清掉预定的到点时刻。</summary>
+	private void CheckAutoResume()
+	{
+		try
+		{
+			if (!_timeStopOn || _autoResumeDeadlineMs == 0UL) { return; }
+			if (Time.GetTicksMsec() < _autoResumeDeadlineMs) { return; }
+			_autoResumeDeadlineMs = 0UL;
+			Disengage("自动解除（设定 " + _autoResumeSec + " 秒）");
+		}
+		catch { }
+	}
+
 	private void MaintainTimeStop()
 	{
 		if (!_timeStopOn)
@@ -2898,6 +3353,8 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 
 	private void Warn(string msg)
 	{
+		if (!EnableInfoLog) { return; }
+		// ★ 2026-10-14：该输出原先绕过日志开关，现统一受 enableLog 控制
 		try { if (_context != null) { _context.Warn(LogPrefix + msg); } else { GD.PrintErr(LogPrefix + msg); } }
 		catch { }
 	}
@@ -3008,6 +3465,13 @@ public sealed class TimeStopEntry : IXWModRuntimeEntry
 	{
 		try
 		{
+			// ★ v1.1.0：时停面板（16 卡槽面板）打开时，落在面板上的点击同样不能转发 ——
+			//   否则点了复选框会顺带把子弹/加农炮的 MousePress 收走（面板在暂停树下，
+			//   GUI 会吃掉自己的点击，但本 Mod 的**轮询中继**是绕过 GUI 的）。
+			if (IsOverPanel(viewportPos))
+			{
+				return true;
+			}
 			for (int i = 0; i < 2; i++)
 			{
 				Control c = (i == 0) ? _buttonHost : _button;

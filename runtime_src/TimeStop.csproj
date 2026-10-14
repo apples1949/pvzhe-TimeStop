@@ -25,9 +25,9 @@
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <Version>1.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
+    <Version>1.1.1</Version>
+    <AssemblyVersion>1.1.1.0</AssemblyVersion>
+    <FileVersion>1.1.1.0</FileVersion>
     <!-- 游戏程序集是 net9.0；压掉 MSB3277 版本冲突警告（否则构建日志膨胀、耗时变长） -->
     <NoWarn>$(NoWarn);MSB3277</NoWarn>
     <MSBuildWarningsAsMessages>MSB3277</MSBuildWarningsAsMessages>
@@ -35,6 +35,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="..\..\KeybindPanelManager.cs" Link="KeybindPanelManager.cs" />
+    <Compile Include="..\..\QrCodeBitmap.cs" Link="QrCodeBitmap.cs" />
+    <Compile Include="..\..\SponsorQrInjector.cs" Link="SponsorQrInjector.cs" />
+    <Compile Include="..\..\BattleOptionColumns.cs" Link="BattleOptionColumns.cs" />
+    <Compile Include="..\..\PosEditorRow.cs" Link="PosEditorRow.cs" />
     <Compile Remove="check_*.cs" />
     <None Include="check_*.cs" />
   </ItemGroup>

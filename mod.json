@@ -2,21 +2,720 @@
   "schemaVersion": 2,
   "id": "timestop",
   "name": "时停",
-  "version": "1.0.35",
-  "author": "本地",
-  "description": "v1.0.35：按钮形态恢复为**绿框**（PanelContainer + Label，字号 18/描边 4）；复选框形态的代码完整保留，改内部开关 UseButtonStyle = false 即可切回。\nv1.0.34：切到内部开关 UseButtonStyle=false 的**复选框形态**（与加速同款 CheckBox，字号 18/描边 4）。\nv1.0.33：修复与「三倍加速」等自绘控件的冲突 —— 候选控件下界从「加速底边」放宽到「加速顶边」，接受**用自绘控件替换掉加速复选框**的 Mod；此前这类控件被过滤掉，时停会压在它身上。\nv1.0.32：按用户要求，把「时停」的样式与文字改成与游戏自带「加速」按钮**同一大小**（等效字号 18 / 描边 4 —— 加速按钮是 font_size 24 × scale 0.78 ≈ 18.7；不直接抄 scale 是因为本 Mod 的命中判定走 layout 矩形、不含 scale）。\n在游戏内「加速」按钮正下方新增「时停」按钮：点击后冻结整个战场（僵尸/子弹/植物/飘落阳光全部静止），但仍可正常种植、铲除植物与收集阳光金币。未触发时显示绿色，触发中显示红色。v1.0.14：★ 根因修复 —— Mod 程序集是手写 csproj、没有 Godot 源码生成器，自定义 Node 子类的 _Input/_PhysicsProcess 引擎根本不会调用；改用 SceneTree 的 physics_frame / process_frame 信号通道驱动全部逻辑。并修正选卡命中判定坐标系与「按住重复触发」两个 bug。",
+  "version": "1.1.1",
+  "author": "apples1949",
+  "description": "在游戏内「加速」按钮正下方新增「时停」按钮：点击后冻结整个战场（僵尸/子弹/植物/飘落阳光全部静止），但仍可正常种植、铲除植物与收集阳光金币。未触发时显示绿色，触发中显示红色。v1.1.0 新增「16 卡槽触发面板」：面板固定 16 行（对应 16 个卡槽），每行显示卡槽序号 + 该卡槽植物名 + 种植 CD 状态，行右侧复选框勾选后，该卡槽「种植 CD 结束」时自动触发时停；解除仍是点时停按钮或按快捷键。面板可用独立快捷键呼出（可留空）；未设面板快捷键时，战斗设置页会出现「时停 · 卡槽触发面板」按钮作为入口。",
+  "playInstructions": "一键冻结全场的时停按钮 + 16 卡槽自动触发面板。\n1. 战斗中右上角会出现「时停」按钮，点一下冻结/解冻。\n2. 时停期间仍可种植物、铲植物、收阳光金币。\n3. 面板（16 卡槽触发）：默认用「面板呼出键」呼出；没设键时去「选项 → 战斗设置」（设置血条那一页）点「时停 · 卡槽触发面板」。\n4. 面板里勾选某一行 ⇒ 该卡槽种植 CD 结束时自动时停；解除：点时停按钮 / 按快捷键 / 面板里的「解除时停」。\n5. 按钮样式、位置、时停快捷键、面板呼出键都在：选项 → Mod 管理 → 时停 → 配置。",
   "dependencies": [],
   "conflicts": [],
   "provides": {},
   "overrides": {},
   "scripts": [],
+  "settings": [
+    {
+      "key": "style",
+      "type": "enum",
+      "label": "按钮样式",
+      "group": "外观",
+      "default": "1",
+      "description": "控件外观样式。改完**立刻生效**（战斗中的控件会按新样式重建）。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "options": [
+        {
+          "value": "1",
+          "label": "1 · 绿框（默认）"
+        },
+        {
+          "value": "2",
+          "label": "2 · 复选框"
+        }
+      ]
+    },
+    {
+      "key": "autoResumeSec",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 60,
+      "step": 1,
+      "label": "自动解除时停（秒）",
+      "description": "时停开始后 N 秒自动解除。0 = 不自动解除（只能手动/快捷键解除）。若在到点前手动解除，则取消这次预订的自动解除，下次触发时停重新计时。",
+      "applyMode": "immediate",
+      "affectsGameplay": false
+    },
+    {
+      "key": "positionMode",
+      "type": "enum",
+      "label": "按钮位置",
+      "group": "外观",
+      "default": "auto",
+      "description": "auto = 自动排在「加速」下方（默认，会跟着其它 Mod 控件让位）；custom = 用下面的绝对坐标。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "options": [
+        {
+          "value": "auto",
+          "label": "自动（排在加速下方）"
+        },
+        {
+          "value": "custom",
+          "label": "自定义绝对坐标"
+        }
+      ]
+    },
+    {
+      "key": "customX",
+      "type": "int",
+      "label": "自定义 X（%）",
+      "group": "外观",
+      "default": 1,
+      "min": 0,
+      "max": 100,
+      "step": 1,
+      "description": "按钮左边缘位置，按屏幕宽度的百分比（0 = 最左，100 = 最右）。不再随窗口大小变。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "visibleWhen": {
+        "key": "positionMode",
+        "op": "eq",
+        "value": "custom"
+      }
+    },
+    {
+      "key": "customY",
+      "type": "int",
+      "label": "自定义 Y（%）",
+      "group": "外观",
+      "default": 33,
+      "min": 0,
+      "max": 100,
+      "step": 1,
+      "description": "按钮上边缘位置，按屏幕高度的百分比（0 = 最上，100 = 最下）。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "visibleWhen": {
+        "key": "positionMode",
+        "op": "eq",
+        "value": "custom"
+      }
+    },
+    {
+      "key": "aboutStyles",
+      "type": "text",
+      "label": "按钮样式说明",
+      "group": "关于",
+      "content": "样式说明（宿主面板不支持图片，这里用文字描述；想看图的见下方链接）\n1 · 绿框：绿色描边的圆角框，里面写「时停」，视觉最醒目。\n2 · 复选框：与游戏自带「加速」同款的 CheckBox，勾上即冻结。"
+    },
+    {
+      "key": "aboutChangelog",
+      "type": "text",
+      "label": "更新内容",
+      "group": "关于",
+      "content": "v1.1.1 · 2026-10-12\n修复：从**战斗设置页**（设置植物僵尸血条那一页）点「时停 · 卡槽触发面板」打开面板后，设置页不会自动关闭、一直叠在战场上（而且那页会让游戏保持暂停），看起来像\"点了没反应\"。现在打开面板时会自动替你按它的「返回」关掉该页。\n面板显示层级从 95 抬到 150，确保盖在游戏对话框与战斗 UI 之上。\n（性能）共用组件 SponsorQrInjector 的两轮优化：全树遍历改用引擎原生 FindChild + 30 帧节流，单帧开销由 434~1715µs 降到 1.3~5.1µs。\n\nv1.1.0 · 2026-10-12\n新增「16 卡槽触发面板」：16 行分别对应 16 个卡槽，显示卡槽序号、植物名与种植 CD 状态；行右侧复选框勾选后，该卡槽种植 CD 结束即自动触发时停（解除照旧：点时停按钮或按快捷键，也可在面板里点「解除时停」）。\n新增「时停面板呼出键」配置项（下拉选择 + 配置页「录制快捷键」按钮）；若留空，则在战斗设置页（设置植物僵尸血条那一页）自动出现「时停 · 卡槽触发面板」按钮。勾选状态持久化在 user://TimeStop.cfg，重开游戏仍保留。\n修复：时停/面板快捷键在录制枚举名键（如手机音量键）时只按首字母轮询（录「音量+」实际轮询字母 V）—— 改为按键名解析。\n修复：同一 Mod 注册第二个快捷键时，配置页「录制快捷键」按钮注不出来（共享组件全局帧计数器奇偶导致）。\n\nv1.0.39 · 2026-10-12\n手机端录制「音量键」保存失败（提示「配置 'toggleHotkey' 的值无效」）：录制面板把键名转成配置值时用的是 Godot 枚举名 `Volumeup`（Volume 后小写），而配置项选项写的是 `VolumeUp`，两边拼写不一致被宿主校验拒绝。现在统一映射成选项拼写；顺带修好 Space / - / = / , / . 这五个键（旧逻辑会把它们转成空白或符号而失配）。\nv1.0.38 · 2026-10-11\n修复：复选框样式下用快捷键切时停，复选框勾选状态/按钮颜色不更新（Engage/Disengage 缺视觉同步）。\nv1.0.37 · 2026-10-11\n调整：按钮样式修改后立即生效（无需重启，自动重建控件）。\n说明：快捷键与按钮点击共用同一道 1 秒防抖闸（防误触设计，快捷键同样受限）。\nv1.0.36 · 2026-10-11\n新增：时停快捷键改下拉选择 + 配置页「录制快捷键」按钮（无面板呼出键）；移除样式演示图关于节与 GitHub 字样。\nv1.0.35 · 当前版本\nv1.0.32：按用户要求，把「时停」的样式与文字改成与游戏自带「加速」按钮**同一大小**（等效字号 18 / 描边 4 —— 加速按钮是 font_size 24 × scale 0.78 ≈ 18.7；不直接抄 scale 是因为本 Mod 的命中判定走 layout 矩形、不含 scale）。\nv1.0.33：修复与「三倍加速」等自绘控件的冲突 —— 候选控件下界从「加速底边」放宽到「加速顶边」，接受**用自绘控件替"
+    },
+    {
+      "key": "toggleHotkey",
+      "type": "enum",
+      "label": "时停快捷键",
+      "group": "功能",
+      "default": "",
+      "description": "时停开关的快捷键（默认无绑定）。下拉直接选键，保存后立即生效；也可在配置页点「录制快捷键」按钮后按新键录入。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "options": [
+        {
+          "value": "",
+          "label": "（无绑定）"
+        },
+        {
+          "value": "A",
+          "label": "A"
+        },
+        {
+          "value": "B",
+          "label": "B"
+        },
+        {
+          "value": "C",
+          "label": "C"
+        },
+        {
+          "value": "D",
+          "label": "D"
+        },
+        {
+          "value": "E",
+          "label": "E"
+        },
+        {
+          "value": "F",
+          "label": "F"
+        },
+        {
+          "value": "G",
+          "label": "G"
+        },
+        {
+          "value": "H",
+          "label": "H"
+        },
+        {
+          "value": "I",
+          "label": "I"
+        },
+        {
+          "value": "J",
+          "label": "J"
+        },
+        {
+          "value": "K",
+          "label": "K"
+        },
+        {
+          "value": "L",
+          "label": "L"
+        },
+        {
+          "value": "M",
+          "label": "M"
+        },
+        {
+          "value": "N",
+          "label": "N"
+        },
+        {
+          "value": "O",
+          "label": "O"
+        },
+        {
+          "value": "P",
+          "label": "P"
+        },
+        {
+          "value": "Q",
+          "label": "Q"
+        },
+        {
+          "value": "R",
+          "label": "R"
+        },
+        {
+          "value": "S",
+          "label": "S"
+        },
+        {
+          "value": "T",
+          "label": "T"
+        },
+        {
+          "value": "U",
+          "label": "U"
+        },
+        {
+          "value": "V",
+          "label": "V"
+        },
+        {
+          "value": "W",
+          "label": "W"
+        },
+        {
+          "value": "X",
+          "label": "X"
+        },
+        {
+          "value": "Y",
+          "label": "Y"
+        },
+        {
+          "value": "Z",
+          "label": "Z"
+        },
+        {
+          "value": "0",
+          "label": "0"
+        },
+        {
+          "value": "1",
+          "label": "1"
+        },
+        {
+          "value": "2",
+          "label": "2"
+        },
+        {
+          "value": "3",
+          "label": "3"
+        },
+        {
+          "value": "4",
+          "label": "4"
+        },
+        {
+          "value": "5",
+          "label": "5"
+        },
+        {
+          "value": "6",
+          "label": "6"
+        },
+        {
+          "value": "7",
+          "label": "7"
+        },
+        {
+          "value": "8",
+          "label": "8"
+        },
+        {
+          "value": "9",
+          "label": "9"
+        },
+        {
+          "value": "F1",
+          "label": "F1"
+        },
+        {
+          "value": "F2",
+          "label": "F2"
+        },
+        {
+          "value": "F3",
+          "label": "F3"
+        },
+        {
+          "value": "F4",
+          "label": "F4"
+        },
+        {
+          "value": "F5",
+          "label": "F5"
+        },
+        {
+          "value": "F6",
+          "label": "F6"
+        },
+        {
+          "value": "F7",
+          "label": "F7"
+        },
+        {
+          "value": "F8",
+          "label": "F8"
+        },
+        {
+          "value": "F9",
+          "label": "F9"
+        },
+        {
+          "value": "F10",
+          "label": "F10"
+        },
+        {
+          "value": "F11",
+          "label": "F11"
+        },
+        {
+          "value": "F12",
+          "label": "F12"
+        },
+        {
+          "value": "Space",
+          "label": "空格"
+        },
+        {
+          "value": "Enter",
+          "label": "Enter"
+        },
+        {
+          "value": "Tab",
+          "label": "Tab"
+        },
+        {
+          "value": "Insert",
+          "label": "Insert"
+        },
+        {
+          "value": "Delete",
+          "label": "Delete"
+        },
+        {
+          "value": "Home",
+          "label": "Home"
+        },
+        {
+          "value": "End",
+          "label": "End"
+        },
+        {
+          "value": "Pageup",
+          "label": "PageUp"
+        },
+        {
+          "value": "Pagedown",
+          "label": "PageDown"
+        },
+        {
+          "value": "Up",
+          "label": "方向↑"
+        },
+        {
+          "value": "Down",
+          "label": "方向↓"
+        },
+        {
+          "value": "Left",
+          "label": "方向←"
+        },
+        {
+          "value": "Right",
+          "label": "方向→"
+        },
+        {
+          "value": "Minus",
+          "label": "-"
+        },
+        {
+          "value": "Equal",
+          "label": "="
+        },
+        {
+          "value": "Comma",
+          "label": ","
+        },
+        {
+          "value": "Period",
+          "label": "."
+        },
+        {
+          "value": "VolumeUp",
+          "label": "手机音量+"
+        },
+        {
+          "value": "VolumeDown",
+          "label": "手机音量-"
+        },
+        {
+          "value": "VolumeMute",
+          "label": "手机静音"
+        }
+      ]
+    },
+    {
+      "key": "panelHotkey",
+      "type": "enum",
+      "label": "时停面板呼出键",
+      "group": "功能",
+      "default": "",
+      "description": "呼出/收起「16 卡槽触发面板」的快捷键（默认无绑定）。下拉直接选键，或点本行「录制快捷键」按钮按键录入。★ 留空（无绑定）时，战斗设置页会自动出现「时停 · 卡槽触发面板」按钮作为入口；设了键则隐藏该按钮。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "options": [
+        {
+          "value": "",
+          "label": "（无绑定）"
+        },
+        {
+          "value": "A",
+          "label": "A"
+        },
+        {
+          "value": "B",
+          "label": "B"
+        },
+        {
+          "value": "C",
+          "label": "C"
+        },
+        {
+          "value": "D",
+          "label": "D"
+        },
+        {
+          "value": "E",
+          "label": "E"
+        },
+        {
+          "value": "F",
+          "label": "F"
+        },
+        {
+          "value": "G",
+          "label": "G"
+        },
+        {
+          "value": "H",
+          "label": "H"
+        },
+        {
+          "value": "I",
+          "label": "I"
+        },
+        {
+          "value": "J",
+          "label": "J"
+        },
+        {
+          "value": "K",
+          "label": "K"
+        },
+        {
+          "value": "L",
+          "label": "L"
+        },
+        {
+          "value": "M",
+          "label": "M"
+        },
+        {
+          "value": "N",
+          "label": "N"
+        },
+        {
+          "value": "O",
+          "label": "O"
+        },
+        {
+          "value": "P",
+          "label": "P"
+        },
+        {
+          "value": "Q",
+          "label": "Q"
+        },
+        {
+          "value": "R",
+          "label": "R"
+        },
+        {
+          "value": "S",
+          "label": "S"
+        },
+        {
+          "value": "T",
+          "label": "T"
+        },
+        {
+          "value": "U",
+          "label": "U"
+        },
+        {
+          "value": "V",
+          "label": "V"
+        },
+        {
+          "value": "W",
+          "label": "W"
+        },
+        {
+          "value": "X",
+          "label": "X"
+        },
+        {
+          "value": "Y",
+          "label": "Y"
+        },
+        {
+          "value": "Z",
+          "label": "Z"
+        },
+        {
+          "value": "0",
+          "label": "0"
+        },
+        {
+          "value": "1",
+          "label": "1"
+        },
+        {
+          "value": "2",
+          "label": "2"
+        },
+        {
+          "value": "3",
+          "label": "3"
+        },
+        {
+          "value": "4",
+          "label": "4"
+        },
+        {
+          "value": "5",
+          "label": "5"
+        },
+        {
+          "value": "6",
+          "label": "6"
+        },
+        {
+          "value": "7",
+          "label": "7"
+        },
+        {
+          "value": "8",
+          "label": "8"
+        },
+        {
+          "value": "9",
+          "label": "9"
+        },
+        {
+          "value": "F1",
+          "label": "F1"
+        },
+        {
+          "value": "F2",
+          "label": "F2"
+        },
+        {
+          "value": "F3",
+          "label": "F3"
+        },
+        {
+          "value": "F4",
+          "label": "F4"
+        },
+        {
+          "value": "F5",
+          "label": "F5"
+        },
+        {
+          "value": "F6",
+          "label": "F6"
+        },
+        {
+          "value": "F7",
+          "label": "F7"
+        },
+        {
+          "value": "F8",
+          "label": "F8"
+        },
+        {
+          "value": "F9",
+          "label": "F9"
+        },
+        {
+          "value": "F10",
+          "label": "F10"
+        },
+        {
+          "value": "F11",
+          "label": "F11"
+        },
+        {
+          "value": "F12",
+          "label": "F12"
+        },
+        {
+          "value": "Space",
+          "label": "空格"
+        },
+        {
+          "value": "Enter",
+          "label": "Enter"
+        },
+        {
+          "value": "Tab",
+          "label": "Tab"
+        },
+        {
+          "value": "Insert",
+          "label": "Insert"
+        },
+        {
+          "value": "Delete",
+          "label": "Delete"
+        },
+        {
+          "value": "Home",
+          "label": "Home"
+        },
+        {
+          "value": "End",
+          "label": "End"
+        },
+        {
+          "value": "Pageup",
+          "label": "PageUp"
+        },
+        {
+          "value": "Pagedown",
+          "label": "PageDown"
+        },
+        {
+          "value": "Up",
+          "label": "方向↑"
+        },
+        {
+          "value": "Down",
+          "label": "方向↓"
+        },
+        {
+          "value": "Left",
+          "label": "方向←"
+        },
+        {
+          "value": "Right",
+          "label": "方向→"
+        },
+        {
+          "value": "Minus",
+          "label": "-"
+        },
+        {
+          "value": "Equal",
+          "label": "="
+        },
+        {
+          "value": "Comma",
+          "label": ","
+        },
+        {
+          "value": "Period",
+          "label": "."
+        },
+        {
+          "value": "VolumeUp",
+          "label": "手机音量+"
+        },
+        {
+          "value": "VolumeDown",
+          "label": "手机音量-"
+        },
+        {
+          "value": "VolumeMute",
+          "label": "手机静音"
+        }
+      ]
+    },
+    {
+      "key": "enableLog",
+      "type": "bool",
+      "label": "输出诊断日志",
+      "group": "诊断",
+      "description": "排查问题时打开，会把运行状态写进 godot.log。平时关掉，不刷日志。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "default": false
+    },
+    {
+      "key": "aboutAuthor",
+      "type": "richtext",
+      "label": "作者与链接",
+      "group": "关于",
+      "content": "时停 v1.0.39 · 作者：apples1949\n\n[url=https://space.bilibili.com/186773722]B 站空间[/url]\n[url=https://apples1949.lanzouc.com/b007uuknqd]蓝奏云下载（密码 762b）[/url]\n\n本模组为玩家自制 Mod，与《植物大战僵尸杂交重制版》官方无隶属关系。\n赞助：微信扫码支持作者（见下方收款码图片）。"
+    }
+  ],
   "runtimeAssembly": "Runtime/ModAssembly.dll",
   "runtimeEntryType": "TimeStopEntry",
-  "runtimeApiVersion": 1,
+  "runtimeApiVersion": 3,
   "runtimeAssemblyPolicy": "optional",
   "blueprints": [],
   "translations": [],
   "resources": [
+    "Resources/SponsorQR.png",
     "Runtime/ModAssembly.dll"
   ]
 }

@@ -173,5 +173,14 @@ if __name__ == "__main__":
     os.makedirs(os.path.dirname(LOG), exist_ok=True)
     with open(LOG, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    print("\n".join(lines))
+    # 控制台是 GBK 时 print 会 UnicodeEncodeError（脚本以"异常"收尾，看起来像失败）。
+    # 降到 errors="replace"，退出码仍由 rc 决定。
+    try:
+        sys.stdout.reconfigure(encoding=sys.stdout.encoding or "utf-8", errors="replace")
+    except Exception:
+        pass
+    try:
+        print("\n".join(lines))
+    except Exception:
+        print("\n".join(lines).encode("utf-8", "replace").decode("utf-8", "replace"))
     sys.exit(rc)

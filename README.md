@@ -10,10 +10,87 @@
 但**仍能种植植物、铲除植物、收集阳光金币**。
 
 - Mod ID：`timestop`
-- 版本：**1.0.31**
+- 版本：**1.1.0**
 
 > 完整版本历史见文末「版本历史」一节。
-- 入口类：`TimeStopEntry`
+- 入口类：`TimeStopEntry`（v1.1.0 起为 `partial`，面板部分在 `runtime_src/TimeStopPanel.cs`）
+
+---
+
+## ★ v1.1.0（2026-10-12）新增：16 卡槽触发面板
+
+### 需求映射
+
+| 用户需求 | 实现 |
+|---|---|
+| 面板 16 行，分别显示 16 个卡槽 | `TimeStopPanel.cs / EnsurePanel()`：固定渲染 16 行（游戏 `LEVEL_SEEDBANK_METHOD.PRESET` 用满 16 槽）；行读数来自 `TowerDefenseManager.GetSeedBankList()`（= `seedBank.packetList`，即卡槽逻辑顺序） |
+| 显示卡槽对应的名称 | `PacketDisplayName()`：`TowerDefensePacketConfig.name` 里存的**就是翻译键**（如 `TOWERDEFENSE_PLANT_BLOVER_NAME`，见内置 `.../Packet/PlantBlover.tres`），过 `TranslationServer.Translate()` 得中文；取不到再回落角色键/`saveKey`。**顺带多给一列**：`CD 12.3s` / `就绪`，一眼看出哪个槽即将触发 |
+| 每行右侧一个复选框 | 每行 `HBoxContainer` = 序号 + 名称 + CD + `CheckBox`（`ProcessMode=Always`，暂停树下也能点） |
+| 勾选 ⇒ 该卡槽种植 CD 结束后触发时停 | `WatchSlotTriggers()`（见下方状态机），触发走既有 `Engage()` 通道 |
+| 点击时停按钮 或 快捷键 解除 | 不变，仍走既有 `Toggle()` 通道；面板里另有「解除时停」按钮 |
+| 面板用**已有的**单个快捷键面板与快捷键选择做配置 | mod.json 新增 `panelHotkey`（enum 下拉，选项表与 `toggleHotkey` **逐项一致**，69 项）+ 配置页自动出现第二个「录制快捷键」按钮（`KeybindPanelManager.Tick` 以 `panelHotkey` 为锚）。面板内另有「设置面板呼出键」按钮，走 `KeybindPanelManager.OpenFor()` |
+| 未设面板快捷键 ⇒ 战斗设置页加一个入口按钮 | `TryInjectOptionButton()`：`BattleOption` 对话框出现时（判据 = `_tree.Paused`，该 tscn 的 `pasue=true`）向选项列表追加「时停 · 卡槽触发面板」按钮；**设了面板快捷键则该按钮自动隐藏**（`SyncOptionButtonVisibility()`） |
+
+### 触发状态机（`WatchSlotTriggers()`）
+
+只在**战斗中且当前未时停**时判定；规则三条：
+
+```
+冷却中 且 !armBlocked  ⇒ armed = true          （该卡被用掉了，CD 走完就该触发）
+就绪                    ⇒ armBlocked = false     （开场保护解除）
+                          且若 armed ⇒ 触发时停并清 armed
+armBlocked（开场保护）   = 换关/换卡槽实例后置真，直到该槽出现过"就绪"
+```
+
+覆盖的场景（全部有离线测试，见下）：
+
+| # | 场景 | 期望 |
+|---|---|---|
+| 1 | 勾选来自配置文件 + 关卡自带 `startingCooldown` | 走完**不触发**（开场保护） |
+| 2 | 正常种下 → CD 结束 | 触发 |
+| 3 | 勾选时该卡正在冷却 | CD 结束触发（勾选回调里直接 arm） |
+| 4 | 勾选时就绪 | 就绪期间不触发；下次种植后 CD 结束才触发 |
+| 5 | **时停期间种下、解除后** | 解除后看到"冷却中"即 arm ⇒ CD 结束触发 |
+| 6 | 槽位换卡（卡片实例 id 变化） | 新卡"本来就凉着"**不触发**；它被真的用掉后才触发 |
+| 7 | 取消勾选 | 不再触发 |
+| 8 | 换关（`ResetWatchState`） | 新一局开场 CD 不触发 |
+
+> 场景 5 与 6 是**离线测试抓出来的真实缺陷**（初版用"就绪→冷却边沿"来 arm，会漏掉跨越暂停的种植；
+> 换卡后新卡的既有冷却会被误当成"玩家种下"）。测试脚本：`.cache/check_timestop_slots.py`（11/11 全绿）。
+
+### 与其它 Mod 的共存（已实测）
+
+- 战斗设置页：**装了 HealthCooldownLine 时**它会把原生 `CenterContainer/VBoxContainer`
+  搬进 `CenterContainer/ModOptionColumns/ModCol1/`，所以 `ResolveOptionList()` 两条路径都试
+  （先找 `ModCol1/VBoxContainer`，再退回 `CenterContainer/VBoxContainer`），最后还有
+  "CenterContainer 下第一个 VBoxContainer"的兜底。
+- 点击屏蔽：本 Mod 的选卡/种植/中继都是**手工命中测试、绕过 GUI 派发**，
+  所以面板打开时 `IsOverPanel()` 会挡掉落在面板上的点击（`DriveUiPicks` / `DrivePlanting` /
+  `IsOverModButton`），否则"点复选框"会顺带选中下面那张卡或就地种一棵。
+- **复选框只走原生 GUI 派发，不叠加鼠标轮询** —— 两条路径会各触发一次（"点一下跳两下"，
+  本 Mod 在自绘按钮上已踩过）。
+
+### 勾选状态持久化
+
+`user://TimeStop.cfg` 的 `[trigger] slot0..slot15`（布尔）。重开游戏保留。
+**不放进 mod.json 的 settings**：宿主 `type:"string"` 在设置 UI 的控件派发里会走 `default: return`，
+有把同页后续设置项整段漏渲染的风险，改用 Godot `ConfigFile` 更稳（与 HealthCooldownLine 同款做法）。
+
+### 顺带修掉的两个既有缺陷
+
+1. **枚举名快捷键只按首字母轮询**：`OnHotkeyTick` 原来 `key[0]` 转 `Key`，
+   录「手机音量+」（`VolumeUp`）实际轮询的是字母 `V`。改用既有 `ParseKeySetting`，单字符与枚举名两条路都对。
+2. **同一 Mod 注册第二个快捷键时，配置页「录制快捷键」按钮注不出来**：
+   共享组件 `KeybindPanelManager` 用全局 `++_tick % 30`，同一帧被调两次时一个调用点**恒为奇数**、
+   永远不满足 `% 30 == 0`。已改为**按 key 各自计数 + 首次立即注入**（v2.9）。
+
+### 已知边界（未在真机复验）
+
+- 面板的**视觉布局**（16 行在手机屏上的高度/滚动、字号）只做了自适应高度
+  （`Mathf.Clamp(视口高 × 0.52, 220, 460)` + `ScrollContainer`），**没有真机目视确认**。
+- **时停期间点复选框**：控件已设 `ProcessMode=Always`，按 Godot 的 `can_process()` 语义应当可用；
+  但本 Mod 的历史经验是暂停态 GUI 派发容易出意外 —— 若实测点不动，先按快捷键/按钮解除时停再勾选（功能不受影响）。
+- 战斗设置页按钮的**具体落位**取决于 HealthCooldownLine 的列布局，未目视确认。
 
 ---
 
@@ -21,6 +98,7 @@
 
 | 版本 | 变更 |
 | --- | --- |
+| **1.1.0** | ★ 新增 **16 卡槽触发面板**（勾选卡槽 ⇒ 其种植 CD 结束自动时停）+ `panelHotkey` 面板呼出键 + 战斗设置页兜底入口按钮；修枚举名快捷键轮询、修同 Mod 第二个快捷键的「录制快捷键」按钮注入 |
 | **1.0.31** | 「加速」下方若已叠了**别的 Mod 自建控件**（典型例子：「双倍加速」勾选框），锚到**最底部那个 Mod 控件**下方，不再互相压住 |
 | 1.0.30 | **窗口级输入中继** —— 时停期间把"点/拖/动"转发给角色（冻结世界但仍可操作） |
 | 1.0.28 | 两条输入路径（`_Input` 与轮询边沿）**共用同一道防抖闸** |

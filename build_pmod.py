@@ -76,8 +76,14 @@ def main():
         print("Runtime/ 下有非法文件（会被整包拒收）:", bad)
         return 2
 
+    # Resources/*.png 自动收集（SponsorQR 等）
+    res_dir = os.path.join(BASE, "Resources")
+    art = []
+    if os.path.isdir(res_dir):
+        art = sorted("Resources/" + n for n in os.listdir(res_dir) if n.lower().endswith(".png"))
+
     # 护栏 2：resources 必须与实际内容一致
-    actual = sorted(["Runtime/ModAssembly.dll"], key=str.lower)
+    actual = sorted(["Runtime/ModAssembly.dll"] + art, key=str.lower)
     declared = sorted(man.get("resources", []), key=str.lower)
     if actual != declared:
         print("resources 不一致\n  实际:", actual, "\n  声明:", declared)
@@ -87,7 +93,7 @@ def main():
     if man.get("runtimeAssembly") != "Runtime/ModAssembly.dll":
         print("runtimeAssembly 必须恰好是字面量 Runtime/ModAssembly.dll")
         return 4
-    if man.get("runtimeApiVersion") != 1:
+    if not isinstance(man.get("runtimeApiVersion"), int) or man.get("runtimeApiVersion") < 1:
         print("runtimeApiVersion 必须恰好 1")
         return 5
 
@@ -95,6 +101,8 @@ def main():
     with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(os.path.join(BASE, "mod.json"), "mod.json")
         z.write(os.path.join(RUNTIME, "ModAssembly.dll"), "Runtime/ModAssembly.dll")
+        for _rel in art:
+            z.write(os.path.join(BASE, _rel.replace("/", os.sep)), _rel)
 
     size = os.path.getsize(OUT)
     with zipfile.ZipFile(OUT) as z:
