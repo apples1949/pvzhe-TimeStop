@@ -714,7 +714,9 @@ public sealed partial class TimeStopEntry
 			_lastFireSlot = slot;
 			Info("卡槽触发：槽 " + (slot + 1) + "（" + SlotCardNameForLog(slot) + "）种植 CD 结束 → 自动时停。"
 				+ "解除：点「时停」按钮、按快捷键，或在面板里点「解除时停」。");
-			Engage();
+			// ★ v1.1.2（用户新需求）：「自动解除时停」只作用于**自动触发**的时停，
+			//   所以这里显式登记倒计时（armAutoResume = true）；手动触发不登记。
+			Engage(true);
 			RefreshPanelStatus();
 			RefreshPanelRows();
 		}
@@ -988,7 +990,8 @@ public sealed partial class TimeStopEntry
 				arRow.Name = "AutoResumeRow";
 				arRow.AddThemeConstantOverride("separation", 8);
 				Label arTitle = new Label();
-				arTitle.Text = "自动解除时停";
+				// ★ v1.1.2：说明「只作用自动触发」——避免玩家以为手动时停也会自己解除
+				arTitle.Text = "自动解除时停（仅限卡槽自动触发）";
 				arTitle.AddThemeFontSizeOverride("font_size", 14);
 				arTitle.AddThemeColorOverride("font_outline_color", new Color(0, 0, 0, 1));
 				arTitle.AddThemeConstantOverride("outline_size", 4);

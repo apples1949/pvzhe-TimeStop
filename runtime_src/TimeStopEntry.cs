@@ -1872,10 +1872,21 @@ public void Initialize(XWModRuntimeContext context)
 	/// <summary>勾选框切换回调（`Toggled` 信号）。</summary>
 	private void OnTimeStopToggled(bool pressed)
 	{
+		ApplyToggle(pressed, true, "用户取消勾选");
+	}
+
+	/// <summary>
+	/// ★ v1.1.2（用户新需求）：切换时停的统一实现。
+	/// <para>`useGate` = 是否走 1 秒「切换冷却」防抖闸：
+	/// <b>点击按钮 / 复选框</b>才过闸（防连点抖动）；<b>快捷键</b>不过闸（要能瞬时来回切）。</para>
+	/// <para>`reason` = 关闭时写进日志的原因。</para>
+	/// </summary>
+	private void ApplyToggle(bool pressed, bool useGate, string reason)
+	{
 		try
 		{
-			// ★ v1.0.28：同样过防抖闸门（两条输入路径共用同一道闸）
-			if (!PassToggleGate())
+			// ★ v1.0.28：按钮/复选框等"点击类"路径过防抖闸门
+			if (useGate && !PassToggleGate())
 			{
 				return;
 			}
@@ -1885,16 +1896,17 @@ public void Initialize(XWModRuntimeContext context)
 			}
 			if (pressed)
 			{
+				// 手动触发（按钮 / 复选框 / 快捷键）⇒ 不登记"自动解除"倒计时
 				Engage();
 			}
 			else
 			{
-				Disengage("用户取消勾选");
+				Disengage(reason);
 			}
 		}
 		catch (Exception ex)
 		{
-			Warn("勾选框切换异常（已吞）：" + ex.Message);
+			Warn("时停切换异常（已吞）：" + ex.Message);
 		}
 	}
 
@@ -2334,20 +2346,9 @@ public void Initialize(XWModRuntimeContext context)
 		// ★★ v1.0.28（用户建议）：**成功切换后 1 秒内不接受新的切换**。
 		//   彻底根治"长按 / 连点抖动"—— 不依赖去重帧号、也不去猜是哪条输入路径触发的，
 		//   直接给状态加一个时间闸门（原版加速复选框体感上也没法连点刷）。
-		if (!PassToggleGate())
-		{
-			return;
-		}
-		if (_timeStopOn)
-		{
-			Disengage("用户点击关闭");
-		}
-		else
-		{
-			Engage();
-		}
-		UpdateButtonVisual();
-		SyncCheckBoxState();
+		// ★ v1.1.2（用户新需求）：这道闸**只管点击类路径**（本方法 = 按钮点击 / 兜底轮询）；
+		//   快捷键走 ApplyToggle(..., useGate:false)，不再被这 1 秒卡住。
+		ApplyToggle(!_timeStopOn, true, "用户点击关闭");
 	}
 
 	/// <summary>切换防抖闸门：距上次成功切换不足 <see cref="ToggleDebounceMs"/> 就直接拒掉。</summary>
@@ -2594,14 +2595,22 @@ public void Initialize(XWModRuntimeContext context)
 			{
 				bool want = !_timeStopOn;
 				Info("快捷键 " + key + " 切换时停 → " + (want ? "开" : "关"));
-				OnTimeStopToggled(want);
+				// ★ v1.1.2（用户新需求）：快捷键**不过 1 秒切换冷却**（点按钮才过），
+				//   这样可以瞬时连按来回切；同时它属于"手动触发"，不登记自动解除。
+				ApplyToggle(want, false, "快捷键 " + key + " 关闭");
 			}
 			_hotkeyPrev = down;
 		}
 		catch { }
 	}
 
-	private void Engage()
+	/// <summary>开启时停：冻结世界 + 保活交互层。</summary>
+	/// <param name="armAutoResume">
+	/// ★ v1.1.2（用户新需求）：「自动解除时停」<b>只作用于卡槽自动触发</b>。
+	/// <para>`true` = 卡槽触发（`FireSlotTrigger`）⇒ 按设定秒数登记倒计时。</para>
+	/// <para>`false` = 手动触发（按钮 / 复选框 / 快捷键）⇒ <b>不登记</b>，不会自己解除。</para>
+	/// </param>
+	private void Engage(bool armAutoResume = false)
 	{
 		try
 		{
@@ -2611,8 +2620,8 @@ public void Initialize(XWModRuntimeContext context)
 			}
 			_savedTreePaused = _tree.Paused;
 			_timeStopOn = true;
-			// ★ 新需求：按设定秒数登记"预定自动解除"；0 = 不登记（只能手动解除）
-			_autoResumeDeadlineMs = (_autoResumeSec > 0)
+			// ★ v1.1.2：只有"卡槽自动触发"才登记"预定自动解除"；0 = 不登记（只能手动解除）
+			_autoResumeDeadlineMs = (armAutoResume && _autoResumeSec > 0)
 				? (Time.GetTicksMsec() + (ulong)(_autoResumeSec * 1000)) : 0UL;
 
 			// 保活：把交互相关节点设为 Always（暂停后仍响应输入）
@@ -2653,8 +2662,12 @@ public void Initialize(XWModRuntimeContext context)
 		}
 	}
 
-	/// <summary>维持时停：每轮校正 Paused（游戏可能因失焦等自行改动）。</summary>
-	/// <summary>★ 到点自动解除时停（设定秒数用尽时）。手动解除会清掉预定的到点时刻。</summary>
+	/// <summary>
+	/// ★ 到点自动解除时停（设定秒数用尽时）。
+	/// <para>v1.1.2：「预定到点时刻」只在<b>卡槽自动触发</b>时登记（`Engage(true)`）；
+	/// 手动触发（按钮 / 复选框 / 快捷键）不登记 ⇒ 它们永远不会被这里自动解除。</para>
+	/// <para>手动解除（Disengage）会清掉预定的到点时刻。</para>
+	/// </summary>
 	private void CheckAutoResume()
 	{
 		try

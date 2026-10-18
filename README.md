@@ -10,7 +10,7 @@
 但**仍能种植植物、铲除植物、收集阳光金币**。
 
 - Mod ID：`timestop`
-- 版本：**1.1.0**
+- 版本：**1.1.2**
 
 > 完整版本历史见文末「版本历史」一节。
 - 入口类：`TimeStopEntry`（v1.1.0 起为 `partial`，面板部分在 `runtime_src/TimeStopPanel.cs`）
@@ -26,7 +26,7 @@
 | 面板 16 行，分别显示 16 个卡槽 | `TimeStopPanel.cs / EnsurePanel()`：固定渲染 16 行（游戏 `LEVEL_SEEDBANK_METHOD.PRESET` 用满 16 槽）；行读数来自 `TowerDefenseManager.GetSeedBankList()`（= `seedBank.packetList`，即卡槽逻辑顺序） |
 | 显示卡槽对应的名称 | `PacketDisplayName()`：`TowerDefensePacketConfig.name` 里存的**就是翻译键**（如 `TOWERDEFENSE_PLANT_BLOVER_NAME`，见内置 `.../Packet/PlantBlover.tres`），过 `TranslationServer.Translate()` 得中文；取不到再回落角色键/`saveKey`。**顺带多给一列**：`CD 12.3s` / `就绪`，一眼看出哪个槽即将触发 |
 | 每行右侧一个复选框 | 每行 `HBoxContainer` = 序号 + 名称 + CD + `CheckBox`（`ProcessMode=Always`，暂停树下也能点） |
-| 勾选 ⇒ 该卡槽种植 CD 结束后触发时停 | `WatchSlotTriggers()`（见下方状态机），触发走既有 `Engage()` 通道 |
+| 勾选 ⇒ 该卡槽种植 CD 结束后触发时停 | `WatchSlotTriggers()`（见下方状态机）→ `FireSlotTrigger()` 调 **`Engage(true)`**（← v1.1.2 起显式登记「自动解除」倒计时；手动触发的 `Engage()` 不登记） |
 | 点击时停按钮 或 快捷键 解除 | 不变，仍走既有 `Toggle()` 通道；面板里另有「解除时停」按钮 |
 | 面板用**已有的**单个快捷键面板与快捷键选择做配置 | mod.json 新增 `panelHotkey`（enum 下拉，选项表与 `toggleHotkey` **逐项一致**，69 项）+ 配置页自动出现第二个「录制快捷键」按钮（`KeybindPanelManager.Tick` 以 `panelHotkey` 为锚）。面板内另有「设置面板呼出键」按钮，走 `KeybindPanelManager.OpenFor()` |
 | 未设面板快捷键 ⇒ 战斗设置页加一个入口按钮 | `TryInjectOptionButton()`：`BattleOption` 对话框出现时（判据 = `_tree.Paused`，该 tscn 的 `pasue=true`）向选项列表追加「时停 · 卡槽触发面板」按钮；**设了面板快捷键则该按钮自动隐藏**（`SyncOptionButtonVisibility()`） |
@@ -100,6 +100,7 @@ armBlocked（开场保护）   = 换关/换卡槽实例后置真，直到该槽�
 
 | 版本 | 变更 |
 | --- | --- |
+| **1.1.2** | 修复：**快捷键**切换时停不再受 1 秒「切换冷却」限制（可连续快按来回切）；该冷却只作用于**点击「时停」按钮 / 勾复选框**。调整：「自动解除时停（秒）」**只对卡槽自动触发的时停生效**，手动触发（按钮 / 快捷键 / 复选框）不会到点自动解除 —— `Engage(bool armAutoResume)` 显式区分来源，`FireSlotTrigger()` 传 `true`。 |
 | **1.1.1** | 修复：从**战斗设置页**（设置植物僵尸血条那一页）点「时停 · 卡槽触发面板」打开面板后，设置页不会自动关闭、一直叠在战场上（而且那页会让游戏保持暂停），看起来像"点了没反应"。现在打开面板时会自动替你按它的「返回」关掉该页。；面板显示层级从 95 抬到 150，确保盖在游戏对话框与战斗 UI 之上。；（性能）共用组件 SponsorQrInjector 的两轮优化：全树遍历改用引擎原生 FindChild + 30 帧节流，单帧开销由 434~1715µs 降到 1.3~5.1µs。 |
 | **1.1.0** | ★ 新增 **16 卡槽触发面板**（勾选卡槽 ⇒ 其种植 CD 结束自动时停）+ `panelHotkey` 面板呼出键 + 战斗设置页兜底入口按钮；修枚举名快捷键轮询、修同 Mod 第二个快捷键的「录制快捷键」按钮注入 |
 | **1.0.31** | 「加速」下方若已叠了**别的 Mod 自建控件**（典型例子：「双倍加速」勾选框），锚到**最底部那个 Mod 控件**下方，不再互相压住 |
