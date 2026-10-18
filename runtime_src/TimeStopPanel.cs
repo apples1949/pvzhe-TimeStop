@@ -50,6 +50,15 @@ public sealed partial class TimeStopEntry
 	/// <summary>面板快捷键的配置键（mod.json 里声明的 enum 项）。</summary>
 	private const string KPanelHotkey = "panelHotkey";
 
+	/// <summary>
+	/// ★ v1.1.4（用户要求）：面板滑动条「自动解除时停」的上限秒数（60 → 15）。
+	/// 面板与配置页（mod.json 的 autoResumeSec.max）必须保持一致。
+	/// </summary>
+	private const int AutoResumeMaxSec = 15;
+
+	/// <summary>★ v1.1.4：配置键 —— 读取新关卡（含重打当前关卡）时是否清除所有植物的选择。</summary>
+	private const string KClearOnNewLevel = "clearTriggersOnNewLevel";
+
 	/// <summary>勾选状态持久化文件（Godot user:// = %APPDATA%\Godot\app_userdata\植物大战僵尸杂交版\）。</summary>
 	private const string PanelCfgPath = "user://TimeStop.cfg";
 
@@ -603,18 +612,29 @@ public sealed partial class TimeStopEntry
 			{
 				return;
 			}
+			// ★ v1.1.4：换关检测**放在 hasGameStarted 之前** —— 新关卡（含重打当前关卡）
+			//   在读卡/选卡阶段 seedBank 实例就已经换了；若等开打后才检测，玩家在选卡阶段
+			//   勾好的卡会在开打那一瞬间被"清除所有选择"清掉，与用户预期相反。
+			ulong id = bank.GetInstanceId();
+			if (id != _watchBankId)
+			{
+				bool firstWatch = (_watchBankId == 0UL);
+				_watchBankId = id;
+				ResetWatchState();
+				// ★ v1.1.4（用户要求）：配置开关打开时，读取新关卡（含重打当前关卡）
+				//   要清除所有植物的选择。首次建立观测（进第一关）不算"读取新关卡"，
+				//   否则打开游戏后玩家刚勾好的卡会在进第一关时被清掉。
+				if (!firstWatch && ClearTriggersOnNewLevel)
+				{
+					Info("读取新关卡：按设置清除所有卡槽的勾选。");
+					ClearAllSlotTriggers(false);
+				}
+			}
 			if (!bank.hasGameStarted)
 			{
 				return;   // 还没开打：CD 不走
 			}
 			Godot.Collections.Array<TowerDefenseInGamePacketShow> list = mgr.GetSeedBankList();
-			// 换关 / 换卡槽实例 ⇒ 状态全部重置
-			ulong id = bank.GetInstanceId();
-			if (id != _watchBankId)
-			{
-				_watchBankId = id;
-				ResetWatchState();
-			}
 			for (int i = 0; i < SlotCount; i++)
 			{
 				TowerDefenseInGamePacketShow card = null;
@@ -959,6 +979,25 @@ public sealed partial class TimeStopEntry
 			};
 			footer.AddChild(bindKey, false, Node.InternalMode.Disabled);
 
+			// ★ v1.1.4（用户要求）：一键清除所有植物的选择 ——
+			//   按下后 16 个槽位全部取消勾选，所有植物在冷却完成后都不再触发自动时停。
+			Button clearAll = new Button();
+			clearAll.Name = "ClearAllTriggersButton";
+			clearAll.Text = "清除所有选择";
+			clearAll.TooltipText = "一键取消全部 16 个卡槽的勾选：之后所有植物在种植 CD 完成后都不会再触发自动时停";
+			clearAll.CustomMinimumSize = new Vector2(0f, 38f);
+			clearAll.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+			clearAll.ProcessMode = Node.ProcessModeEnum.Always;
+			clearAll.Pressed += () =>
+			{
+				try
+				{
+					ClearAllSlotTriggers(true);
+				}
+				catch { }
+			};
+			footer.AddChild(clearAll, false, Node.InternalMode.Disabled);
+
 			Button release = new Button();
 			release.Text = "解除时停";
 			release.TooltipText = "立即结束时停（与点「时停」按钮、按快捷键等效）";
@@ -983,7 +1022,8 @@ public sealed partial class TimeStopEntry
 			footer.AddChild(release, false, Node.InternalMode.Disabled);
 
 			// ★ 2026-10-13（用户要求：自动解除的设置也写在时停面板里）——
-			//   一行：标签 + 滑动条(0~60 秒) + 数值；改动即写配置并立即生效（0 = 只能手动解除）
+			//   一行：标签 + 滑动条(0~AutoResumeMaxSec 秒) + 数值；改动即写配置并立即生效（0 = 只能手动解除）
+			//   ★ v1.1.4（用户要求）：上限从 60 秒降到 15 秒。
 			try
 			{
 				HBoxContainer arRow = new HBoxContainer();
@@ -999,7 +1039,7 @@ public sealed partial class TimeStopEntry
 				HSlider arSlider = new HSlider();
 				arSlider.Name = "AutoResumeSlider";
 				arSlider.MinValue = 0;
-				arSlider.MaxValue = 60;
+				arSlider.MaxValue = AutoResumeMaxSec;   // ★ v1.1.4：60 → 15
 				arSlider.Step = 1;
 				arSlider.Value = _autoResumeSec;
 				arSlider.CustomMinimumSize = new Vector2(260f, 0f);
@@ -1091,6 +1131,52 @@ public sealed partial class TimeStopEntry
 			}
 		}
 		catch { }
+	}
+
+	/// <summary>
+	/// ★ v1.1.4（用户要求）：一键清除所有植物的选择。
+	/// <para>把 16 个槽位的 `_trigOn` 全部置 false（并清掉待命状态），持久化后刷新面板 ——
+	/// 之后所有植物在种植 CD 完成后都不再触发自动时停。</para>
+	/// <para>`userAction` = true 表示玩家按了面板按钮（写日志）；内部自动清（换关）传 false。</para>
+	/// </summary>
+	private void ClearAllSlotTriggers(bool userAction)
+	{
+		try
+		{
+			bool any = false;
+			for (int i = 0; i < SlotCount; i++)
+			{
+				if (_trigOn[i])
+				{
+					any = true;
+				}
+				_trigOn[i] = false;
+				_trigArmed[i] = false;
+				_slotCardId[i] = 0UL;
+			}
+			SavePanelCfg();
+			// 复选框视觉同步（用无信号赋值，避免再触发一遍 Toggled）
+			for (int i = 0; i < SlotCount && i < _rowCb.Count; i++)
+			{
+				CheckBox cb = _rowCb[i];
+				if (cb != null && GodotObject.IsInstanceValid(cb) && cb.ButtonPressed)
+				{
+					cb.SetPressedNoSignal(false);
+				}
+			}
+			if (userAction)
+			{
+				Info(any
+					? "已一键清除所有卡槽的勾选：16 个槽位全部取消，CD 完成后不再自动时停。"
+					: "一键清除：当前本来就没有勾选任何卡槽。");
+			}
+			RefreshPanelStatus();
+			RefreshPanelRows();
+		}
+		catch (Exception ex)
+		{
+			Warn("一键清除卡槽勾选异常：" + ex.Message);
+		}
 	}
 
 	private void OnSlotCheckToggled(int slot, bool pressed)

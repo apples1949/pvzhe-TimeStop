@@ -253,6 +253,7 @@ public void Initialize(XWModRuntimeContext context)
 					ApplyPositionSetting();   // 位置设置（immediate）
 					ApplyAutoResumeSetting();  // ★ 自动解除时停秒数
 					ApplyButtonCooldownSetting();  // ★ v1.1.3：点击按钮是否加 1 秒冷却
+					ApplyClearOnNewLevelSetting();  // ★ v1.1.4：换关时是否清除所有植物选择
 					Info("时停快捷键已挂载：" + ReadHotkey());
 				}
 			}
@@ -1861,6 +1862,12 @@ public void Initialize(XWModRuntimeContext context)
 					ApplyButtonCooldownSetting();
 					Info("点击按钮冷却已" + (ButtonCooldownEnabled ? "开启（1 秒）" : "关闭（可连点）"));
 				}
+				// ★ v1.1.4：换关清除勾选开关改了 ⇒ 立即生效（下次换关就开始用新值）
+				if (k == KClearOnNewLevel)
+				{
+					ApplyClearOnNewLevelSetting();
+					Info("换新关卡时清除所有植物选择已" + (ClearTriggersOnNewLevel ? "开启" : "关闭（保留勾选）"));
+				}
 				if (k == "style") { styleChanged = true; }
 			}
 			if (styleChanged)
@@ -2421,6 +2428,31 @@ public void Initialize(XWModRuntimeContext context)
 	}
 
 	/// <summary>
+	/// ★ v1.1.4（用户要求）：配置项「读取新关卡（含重打当前关卡）时清除所有植物的选择」的运行时值。
+	/// <para>true = 换关 / 重打当前关卡时，把 16 个卡槽的勾选全部清空。</para>
+	/// <para>false（默认）= 保留勾选，换关后继续按原勾选自动时停。</para>
+	/// </summary>
+	private static bool ClearTriggersOnNewLevel;
+
+	/// <summary>从配置读「新关卡清除所有植物选择」开关（缺省 false，兼容老配置）。</summary>
+	private void ApplyClearOnNewLevelSetting()
+	{
+		try
+		{
+			object v = (_context == null) ? null : _context.Settings.Get<object>(KClearOnNewLevel);
+			if (v == null) { return; }   // 老版本没这个键 ⇒ 保持默认关
+			if (v is bool b) { ClearTriggersOnNewLevel = b; return; }
+			if (v is string s && bool.TryParse(s, out bool sb)) { ClearTriggersOnNewLevel = sb; return; }
+			if (v is System.Text.Json.JsonElement je)
+			{
+				if (je.ValueKind == System.Text.Json.JsonValueKind.True) { ClearTriggersOnNewLevel = true; }
+				else if (je.ValueKind == System.Text.Json.JsonValueKind.False) { ClearTriggersOnNewLevel = false; }
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>
 	/// ★ v1.0.25：把 `_timeStopOn` 同步到勾选框的视觉状态。
 	/// 走"轮询命中"那条路（`PollButtonClick` → `Toggle()`）时，勾选框自己不会变，
 	/// 必须手动同步；用 `SetPressedNoSignal` 避免反过来再触发一次 `Toggled`。
@@ -2454,7 +2486,8 @@ public void Initialize(XWModRuntimeContext context)
 		{
 			int v = ReadIntSetting(KAutoResume, _autoResumeSec);
 			if (v < 0) { v = 0; }
-			if (v > 600) { v = 600; }
+			// ★ v1.1.4（用户要求）：上限 60 → 15（面板与配置页一致；老配置存的大值在这里收敛）
+			if (v > AutoResumeMaxSec) { v = AutoResumeMaxSec; }
 			_autoResumeSec = v;
 		}
 		catch { }
