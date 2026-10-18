@@ -138,7 +138,8 @@ def main():
         ts = time.strftime("%H%M%S")
         for name in os.listdir(CACHE):
             # 只处理"干净"的缓存目录名（不带 .bak），避免把历史备份再备份一层
-            if name == "TimeStop":
+            # ⚠️ 缓存目录名是**小写 mod id**（`timestop`），旧写法写死 `TimeStop` 永远匹配不到
+            if name.lower() == "timestop":
                 src = os.path.join(CACHE, name)
                 dstc = os.path.join(CACHE, name + ".bak_" + ts)
                 i = 1

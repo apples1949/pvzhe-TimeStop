@@ -252,6 +252,7 @@ public void Initialize(XWModRuntimeContext context)
 			catch { }
 					ApplyPositionSetting();   // 位置设置（immediate）
 					ApplyAutoResumeSetting();  // ★ 自动解除时停秒数
+					ApplyButtonCooldownSetting();  // ★ v1.1.3：点击按钮是否加 1 秒冷却
 					Info("时停快捷键已挂载：" + ReadHotkey());
 				}
 			}
@@ -1854,7 +1855,13 @@ public void Initialize(XWModRuntimeContext context)
 			bool styleChanged = false;
 			foreach (string k in keys)
 			{
-				if (k == "style") { styleChanged = true; break; }
+				// ★ v1.1.3：点击冷却开关改了 ⇒ 立即生效（无需重启）
+				if (k == KButtonCooldown)
+				{
+					ApplyButtonCooldownSetting();
+					Info("点击按钮冷却已" + (ButtonCooldownEnabled ? "开启（1 秒）" : "关闭（可连点）"));
+				}
+				if (k == "style") { styleChanged = true; }
 			}
 			if (styleChanged)
 			{
@@ -2348,12 +2355,22 @@ public void Initialize(XWModRuntimeContext context)
 		//   直接给状态加一个时间闸门（原版加速复选框体感上也没法连点刷）。
 		// ★ v1.1.2（用户新需求）：这道闸**只管点击类路径**（本方法 = 按钮点击 / 兜底轮询）；
 		//   快捷键走 ApplyToggle(..., useGate:false)，不再被这 1 秒卡住。
+		// ★ v1.1.3：这道闸本身可由配置项 `buttonCooldown` 关掉（见 PassToggleGate）。
 		ApplyToggle(!_timeStopOn, true, "用户点击关闭");
 	}
 
-	/// <summary>切换防抖闸门：距上次成功切换不足 <see cref="ToggleDebounceMs"/> 就直接拒掉。</summary>
+	/// <summary>
+	/// 切换防抖闸门：距上次成功切换不足 <see cref="ToggleDebounceMs"/> 就直接拒掉。
+	/// <para>★ v1.1.3：受配置项 `buttonCooldown` 控制 —— 关掉它时点击按钮不再有 1 秒冷却。</para>
+	/// </summary>
 	private bool PassToggleGate()
 	{
+		// ★ v1.1.3（用户新需求）：配置开关关掉 ⇒ 点击按钮不加 1 秒冷却
+		if (!ButtonCooldownEnabled)
+		{
+			_lastToggleMsec = Time.GetTicksMsec();
+			return true;
+		}
 		ulong now = Time.GetTicksMsec();
 		if (_lastToggleMsec != 0 && now - _lastToggleMsec < ToggleDebounceMs)
 		{
@@ -2374,6 +2391,34 @@ public void Initialize(XWModRuntimeContext context)
 
 	/// <summary>切换防抖窗口（毫秒）。用户要求"成功触发后 1 秒内不让改时停状态"。</summary>
 	private const ulong ToggleDebounceMs = 1000;
+
+	/// <summary>
+	/// ★ v1.1.3（用户新需求）：配置项「点击按钮冷却 1 秒」的运行时值。
+	/// <para>true（默认）= 点击按钮 / 勾复选框后 1 秒内不接受新的点击（防连点抖动）。</para>
+	/// <para>false = 点击也没有冷却（快捷键本来就不过闸）。</para>
+	/// </summary>
+	private static bool ButtonCooldownEnabled = true;
+
+	/// <summary>配置键：点击按钮是否加 1 秒切换冷却。</summary>
+	private const string KButtonCooldown = "buttonCooldown";
+
+	/// <summary>从配置读「点击按钮冷却」开关（缺省 true，兼容老配置）。</summary>
+	private void ApplyButtonCooldownSetting()
+	{
+		try
+		{
+			object v = (_context == null) ? null : _context.Settings.Get<object>(KButtonCooldown);
+			if (v == null) { return; }   // 老版本没这个键 ⇒ 保持默认开
+			if (v is bool b) { ButtonCooldownEnabled = b; return; }
+			if (v is string s && bool.TryParse(s, out bool sb)) { ButtonCooldownEnabled = sb; return; }
+			if (v is System.Text.Json.JsonElement je)
+			{
+				if (je.ValueKind == System.Text.Json.JsonValueKind.True) { ButtonCooldownEnabled = true; }
+				else if (je.ValueKind == System.Text.Json.JsonValueKind.False) { ButtonCooldownEnabled = false; }
+			}
+		}
+		catch { }
+	}
 
 	/// <summary>
 	/// ★ v1.0.25：把 `_timeStopOn` 同步到勾选框的视觉状态。
