@@ -66,6 +66,13 @@ public sealed partial class TimeStopEntry
 	private const string PanelRootName = "ModTimeStopPanel";
 	private const string OptBtnName = "ModTimeStopPanelButton";
 
+	/// <summary>
+	/// ★ 2026-10-27（用户要求）：本 Mod **独占**的「按钮位置」面板描述
+	/// （时停与加速各一个面板、各一个入口按钮；面板节点名由 `Id` 派生）。
+	/// </summary>
+	private static readonly PosEditorRow.PanelSpec PosSpec =
+		new PosEditorRow.PanelSpec("timestop", "时停按钮 · 位置与样式", "时停·按钮位置");
+
 	// ================================================================ 状态
 
 	private bool _panelBuilt;
@@ -430,13 +437,13 @@ public sealed partial class TimeStopEntry
 				}
 			}
 			catch { }
-			// ★ 2026-10-13（用户要求）：样式也能在战斗设置页里改，与配置页双向同步
-			PosEditorRow.EnsureStyleRow(optionRoot, "timestopstyle", "时停样式",
+			// ★ 2026-10-27（用户要求）：时停**独占**一个面板 + 一个入口按钮（与加速互不干扰）
+			PosEditorRow.EnsureStyleRow(optionRoot, PosSpec, "timestopstyle", "时停样式",
 				new string[] { "1", "2" },
 				new string[] { "1 · 绿框（默认）", "2 · 复选框" },
 				ReadStyleSetting(),
 				ApplyStyleFromEditor);
-			PosEditorRow.Ensure(optionRoot, "timestop", "时停按钮 · 位置",
+			PosEditorRow.Ensure(optionRoot, PosSpec, "timestop", "时停按钮 · 位置",
 				new string[] { "auto", "custom" },
 				new string[] { "自动（排在加速下方）", "自定义绝对坐标" },
 				"custom", ReadPosPreset(), _posX, _posY, bw, bh, ApplyPosFromEditor);
