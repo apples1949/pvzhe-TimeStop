@@ -1342,6 +1342,16 @@ public sealed partial class TimeStopEntry
 	{
 		try
 		{
+			// ★★ v1.2.2（用户报障：游戏还没正式开始也能通过时停把游戏冻住）：
+			//   面板一打开就会 `PauseWhilePanel()` 把 `Paused` 置真 —— 那本身就是一次暂停。
+			//   而面板呼出键走的是 `OnHotkeyTick` → `PanelHotkeyTick()`，**不经过**
+			//   `PanelTick()` 那道「关卡内才允许存在」的门禁 ⇒ 选卡 / 关卡预览阶段也能把面板
+			//   叫出来并冻住游戏。这里补上同一道门禁（只拦「打开」，关闭必须放行）。
+			if (visible && !BattleStarted())
+			{
+				Info("忽略呼出时停面板：战斗尚未正式开始。");
+				return;
+			}
 			if (!_panelBuilt || _panelLayer == null || !GodotObject.IsInstanceValid(_panelLayer))
 			{
 				if (visible && _tree != null && GodotObject.IsInstanceValid(_tree))

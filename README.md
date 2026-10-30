@@ -10,7 +10,7 @@
 但**仍能种植植物、铲除植物、收集阳光金币**。
 
 - Mod ID：`timestop`
-- 版本：**1.1.4**
+- 版本：**1.2.2**
 
 > 完整版本历史见文末「版本历史」一节。
 - 入口类：`TimeStopEntry`（v1.1.0 起为 `partial`，面板部分在 `runtime_src/TimeStopPanel.cs`）
@@ -100,6 +100,7 @@ armBlocked（开场保护）   = 换关/换卡槽实例后置真，直到该槽�
 
 | 版本 | 变更 |
 | --- | --- |
+| **1.2.2** | ★ **修复「游戏还没正式开始也能用时报停把游戏冻住」**：此前按钮显隐由 `IsInBattle()`（`currentControl.isGameRunning`）把关，但**快捷键 / 复选框 / 卡槽自动触发**这条链（`OnHotkeyTick` → `ApplyToggle` → `Engage`）**没有任何入口检查** ⇒ 选卡 / 关卡预览阶段按快捷键就把 `_tree.Paused` 置真，而主扫描的 `MaintainTimeStop()` 每轮又把 Paused 校回 true，关卡状态机（`GameEntry → GameReady → GameRunning`）跑不动 ⇒ 表现为「卡死在开场」。新增 `BattleStarted()` 双重判据（`TowerDefenseManager.Instance.IsGameRunning()` + 卡槽 `hasGameStarted`），在 **`Engage()` 这一个收口**上拒绝未开打的冻结（并同步回视觉「关」）。另修：时停开着时过关 / 失败 / 退出关卡不会自动解除，进下一个关卡开场带着残留冻结 —— `MaintainTimeStop()` 每轮复核，战斗一旦不在进行中立即 `Disengage()` 并还原 `Paused`。另：**面板呼出键**（`PanelHotkeyTick` 走的是 `OnHotkeyTick`，不受 `PanelTick` 那道「关卡内才允许存在」的门禁约束）未开打时也能把面板叫出来，而面板一打开就 `PauseWhilePanel()` 冻结游戏 —— `SetPanelVisible(true)` 补了同一道门禁（关闭照旧放行）。 |
 | **1.1.4** | ① 面板「自动解除时停」滑动条上限 **60 秒 → 15 秒**（`AutoResumeMaxSec`，配置页 `autoResumeSec.max` 同步为 15）。② 面板底部新增 **「清除所有选择」** 按钮：一键取消全部 16 槽勾选（`ClearAllSlotTriggers()`），之后所有植物 CD 完成后不再触发自动时停。③ 新增配置项 **`clearTriggersOnNewLevel`（读取新关卡时清除所有植物选择，默认关）**：打开后读取新关卡（含重打当前关卡）自动清空全部勾选；判据是 `WatchSlotTriggers()` 里 `bank.GetInstanceId()` 变化，**首次进关不算**（`firstWatch` 跳过，避免开局清掉刚勾好的卡）。 |
 | **1.1.3** | 新增配置项 **`buttonCooldown`（点击按钮有 1 秒切换冷却，默认开）**：关掉后点击「时停」按钮 / 勾复选框也可以连续快点，不再等 1 秒；快捷键始终不受冷却限制。`PassToggleGate()` 开头判该开关（`TimeStopEntry.cs`）。改完立即生效。 |
 | **1.1.2** | 修复：**快捷键**切换时停不再受 1 秒「切换冷却」限制（可连续快按来回切）；该冷却只作用于**点击「时停」按钮 / 勾复选框**。调整：「自动解除时停（秒）」**只对卡槽自动触发的时停生效**，手动触发（按钮 / 快捷键 / 复选框）不会到点自动解除 —— `Engage(bool armAutoResume)` 显式区分来源，`FireSlotTrigger()` 传 `true`。 |

@@ -1735,6 +1735,48 @@ public void Initialize(XWModRuntimeContext context)
 		}
 	}
 
+	/// <summary>
+	/// ★★ v1.2.2（用户报障）：**战斗是否已经正式开始**。
+	/// <para>症状：还没开打（选卡 / 关卡预览阶段）时按「时停」快捷键，`_tree.Paused = true`
+	/// 直接把游戏冻在开局前 —— 主扫描里的 `MaintainTimeStop()` 每轮还会把 Paused 校回 true，
+	/// 关卡状态机（GameEntry → GameReady → GameRunning）根本跑不动 ⇒ 表现为「游戏卡死在开场」。</para>
+	/// <para>为什么按钮当时没出现、却还是被冻住了：按钮的显隐由 `IsInBattle()` 把关，
+	/// 而快捷键（`OnHotkeyTick` → `ApplyToggle` → `Engage`）此前**没有任何入口检查**。</para>
+	/// <para>判据（两层，任一层为假即视为「未开始」）：</para>
+	/// <para>① `TowerDefenseManager.Instance.IsGameRunning()` —— 实现就是
+	/// `currentControl.isGameRunning`（全工程 121 处在用；本 Mod 按钮显隐用的也是它），
+	/// 选卡 / 关卡预览阶段为 false。</para>
+	/// <para>② 二次保险：卡槽面板存在但 `hasGameStarted == false`（`GameRunningEntered`
+	/// 已把 isGameRunning 置真、关卡开局生命周期还没跑完的那几帧）同样算未开始。</para>
+	/// <para>⚠️ 拿不到单例等异常情况返回 false（**宁可不开时停，也不能把未开始的游戏冻住**）。</para>
+	/// </summary>
+	private bool BattleStarted()
+	{
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				return false;
+			}
+			if (!mgr.IsGameRunning())
+			{
+				return false;
+			}
+			TowerDefenseInGameSeedBank bank = mgr.GetSeedBank();
+			if (bank != null && GodotObject.IsInstanceValid(bank) && !bank.hasGameStarted)
+			{
+				return false;
+			}
+			return true;
+		}
+		catch (Exception ex)
+		{
+			Warn("判定战斗是否已开始异常（按未开始处理）：" + ex.Message);
+			return false;
+		}
+	}
+
 	private void EnsureButton(Node root)
 	{
 		// ★ v1.0.17（用户要求）：**只在关卡内显示按钮** —— 主菜单 / 地图界面不要出现它。
@@ -2696,6 +2738,18 @@ public void Initialize(XWModRuntimeContext context)
 			{
 				return;
 			}
+			// ★★ v1.2.2（用户报障：游戏还没正式开始也能通过时停把游戏冻住）：
+			//   **所有**开启路径（按钮 / 复选框 / 快捷键 / 卡槽自动触发）都收敛到这里，
+			//   未正式开打一律拒绝冻结，并顺手把视觉状态同步回「关」。
+			if (!BattleStarted())
+			{
+				_timeStopOn = false;
+				_autoResumeDeadlineMs = 0UL;
+				UpdateButtonVisual();
+				SyncCheckBoxState();
+				Info("忽略开启时停：战斗尚未正式开始（选卡 / 关卡预览阶段不许冻结）。");
+				return;
+			}
 			_savedTreePaused = _tree.Paused;
 			_timeStopOn = true;
 			// ★ v1.1.2：只有"卡槽自动触发"才登记"预定自动解除"；0 = 不登记（只能手动解除）
@@ -2766,6 +2820,14 @@ public void Initialize(XWModRuntimeContext context)
 		}
 		if (_tree == null || !GodotObject.IsInstanceValid(_tree))
 		{
+			return;
+		}
+		// ★★ v1.2.2：时停期间战斗若已不在「正式进行」（过关 / 失败 / 退出关卡 / 重打选卡），
+		//   必须立刻解除 —— 否则本 Mod 会把 Paused 一直按在 true 上，新关卡的开场状态机
+		//   （GameEntry → GameReady → GameRunning）跑不动，表现为「新关卡一进去就冻结」。
+		if (!BattleStarted())
+		{
+			Disengage("战斗已不在进行（未开始 / 已结束）");
 			return;
 		}
 		if (!_tree.Paused)
