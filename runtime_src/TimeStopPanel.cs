@@ -486,7 +486,9 @@ public sealed partial class TimeStopEntry
 				changes[KPositionMode] = preset;
 				changes[KCustomX] = x;
 				changes[KCustomY] = y;
-				_context?.Settings?.TrySave(changes, out XWModSettingsSaveResult _);
+				// ★ 2026-11-01：入队（下一帧落盘 + 失败逐键重试 + 不门控日志）
+				if (_persist != null) { _persist.SetMany(changes); }
+				else { _context?.Settings?.TrySave(changes, out XWModSettingsSaveResult _); }
 			}
 			catch { }
 			try
@@ -1074,7 +1076,9 @@ public sealed partial class TimeStopEntry
 						{
 							var ch = new System.Collections.Generic.Dictionary<string, object>();
 							ch[KAutoResume] = sec;
-							_context?.Settings?.TrySave(ch, out XWModSettingsSaveResult _);
+							// ★ 2026-11-01：入队（下一帧落盘 + 失败逐键重试 + 不门控日志）
+							if (_persist != null) { _persist.SetMany(ch); }
+							else { _context?.Settings?.TrySave(ch, out XWModSettingsSaveResult _); }
 						}
 						catch { }
 					}
@@ -1523,8 +1527,27 @@ public sealed partial class TimeStopEntry
 				try { GD.PrintErr("[TimeStop] 配置不可用，面板快捷键未保存。"); } catch { }
 				return;
 			}
+			// ★ 2026-11-01：白名单护栏（见 TimeStopEntry.WriteHotkeySetting 同名说明）
+			if (!KeyOptionGuard.IsAllowed(_context, KPanelHotkey, keySetting))
+			{
+				try
+				{
+					GD.PrintErr("[TimeStop] 该按键不支持绑定：" + keySetting
+						+ "（可在配置页下拉里选支持的键；可选：" + KeyOptionGuard.Describe(_context, KPanelHotkey) + "）");
+				}
+				catch { }
+				return;
+			}
 			var changes = new Dictionary<string, object>();
 			changes[KPanelHotkey] = keySetting ?? "";
+			// ★ 2026-11-01：入队（下一帧落盘 + 失败逐键重试 + 不门控日志）
+			if (_persist != null)
+			{
+				_persist.SetMany(changes);
+				Info("面板快捷键已入队：" + (string.IsNullOrEmpty(keySetting) ? "（无绑定）" : keySetting));
+				SyncOptionButtonVisibility();
+				return;
+			}
 			if (_context.Settings.TrySave(changes, out XWModSettingsSaveResult result))
 			{
 				Info("面板快捷键已保存：" + (string.IsNullOrEmpty(keySetting) ? "（无绑定）" : keySetting) + "（" + result.Message + "）");

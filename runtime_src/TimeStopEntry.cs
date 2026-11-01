@@ -100,6 +100,19 @@ public sealed partial class TimeStopEntry : IXWModRuntimeEntry
 	private Callable _tickCallable;
 	private bool _connected;
 
+	/// <summary>
+	/// ★ 2026-11-01（玩家反馈「战斗设置页里改的设置当时生效、重启后失效」）：
+	/// 所有"控件回调里写配置"的地方（设置页样式行 / 位置行 / 面板自动解除滑动条 / 两个快捷键）
+	/// 不再直接 `Settings.TrySave` 后不管结果，统一交给本哨兵：
+	///   · 控件回调只入队，**下一帧**才真正落盘 ⇒ 天然避开宿主
+	///     `XWModSettingsService._saving` 重入区间（在 Apply→Changed 里再保存会被拒）；
+	///   · 整批被拒时逐键重试，把宿主拒绝的那个键单独报出来，别的键不陪着丢；
+	///   · 落盘后回读自证；
+	///   · 成功/失败都打**不受 EnableInfoLog 门控**的日志（以前失败时一个字都看不到）。
+	/// 设计说明见 runtime_src/SettingsPersist.cs。
+	/// </summary>
+	private SettingsPersist _persist;
+
 	/// <summary>★ v1.0.14：`physics_frame` 信号的回调。
 	///
 	/// ── 为什么不再依赖 relay 节点 ─────────────────────────────────
@@ -213,6 +226,7 @@ public void Initialize(XWModRuntimeContext context)
 			_context = context;
 			_frame = 0;
 			_faultReported = false;
+			_persist = new SettingsPersist(context, LogPrefix);
 			string root = (context == null) ? "<null>" : context.PackageRoot;
 			Info("初始化完成；PackageRoot=" + root + "。将在「加速」按钮正下方创建「时停」开关；"
 				+ "v1.1.0 另加「16 卡槽触发面板」。" + DescribeTriggerSlots() + " 已勾选。");
@@ -488,6 +502,10 @@ public void Initialize(XWModRuntimeContext context)
 	private void OnProcessFrame()
 	{
 		try { SponsorQrInjector.Tick(Engine.GetMainLoop() as SceneTree, "时停", SponsorQrRoot, "Resources/SponsorQR.png"); } catch { }
+		// ★ 2026-11-01（玩家反馈「战斗设置页里改的设置当时生效、重启后失效」）：
+		//   把上一帧入队、还没落盘的配置项在这里补写（失败逐键重试 + 回读自证 +
+		//   不受 enableLog 门控的日志）。详见 runtime_src/SettingsPersist.cs 顶部说明。
+		try { _persist?.Tick(); } catch { }
 		// ★ v1.0.36：快捷键录制面板（配置页「录制快捷键」按钮进入；无面板呼出键）
 		try
 		{
@@ -2599,8 +2617,9 @@ public void Initialize(XWModRuntimeContext context)
 			{
 				var ch = new System.Collections.Generic.Dictionary<string, object>();
 				ch[KStyle] = value;
-				bool _ok = _context?.Settings?.TrySave(ch, out XWModSettingsSaveResult _res) ?? false;
-				try { Info("样式写配置 ok=" + _ok + " value=" + value); } catch { }
+				// ★ 2026-11-01：改成入队（下一帧落盘 + 失败逐键重试 + 不门控日志）
+				if (_persist != null) { _persist.SetMany(ch); }
+				try { Info("样式写配置入队 value=" + value); } catch { }
 			}
 			catch { }
 			ApplyStyleSetting();
@@ -2660,8 +2679,30 @@ public void Initialize(XWModRuntimeContext context)
 		try
 		{
 			if (_context?.Settings == null) { try { GD.PrintErr("[TimeStop] 配置不可用，快捷键未保存。"); } catch { } return; }
+			// ★ 2026-11-01：白名单护栏 —— 宿主对 enum 键要求"值必须在 mod.json 的 options 里"，
+			//   否则整批不落盘。录制器能产出 backspace/斜杠/分号等键，若本 Mod 没声明就不写，
+			//   免得把同一批的其它合法设置一起打掉。
+			if (!KeyOptionGuard.IsAllowed(_context, KToggleHotkey, keySetting))
+			{
+				try
+				{
+					GD.PrintErr("[TimeStop] 该按键不支持绑定：" + keySetting
+						+ "（可在配置页下拉里选支持的键；可选：" + KeyOptionGuard.Describe(_context, KToggleHotkey) + "）");
+				}
+				catch { }
+				return;
+			}
 			var changes = new System.Collections.Generic.Dictionary<string, object>();
 			changes[KToggleHotkey] = keySetting ?? "";
+			// ★ 2026-11-01：入队（下一帧落盘 + 失败逐键重试 + 不门控日志）。
+			//   键录到的值必须落在 mod.json 的 enum options 里，否则宿主 TryValue 会拒掉——
+			//   以前这里失败只看得到一行 PrintErr（且整批被拒时连别的键一起丢）。
+			if (_persist != null)
+			{
+				_persist.SetMany(changes);
+				Info("时停快捷键已入队：" + (string.IsNullOrEmpty(keySetting) ? "（无绑定）" : keySetting));
+				return;
+			}
 			if (_context.Settings.TrySave(changes, out XWModSettingsSaveResult result))
 			{
 				Info("时停快捷键已保存：" + (string.IsNullOrEmpty(keySetting) ? "（无绑定）" : keySetting) + "（" + result.Message + "）");
