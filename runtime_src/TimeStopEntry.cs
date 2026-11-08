@@ -268,6 +268,7 @@ public void Initialize(XWModRuntimeContext context)
 					ApplyAutoResumeSetting();  // ★ 自动解除时停秒数
 					ApplyButtonCooldownSetting();  // ★ v1.1.3：点击按钮是否加 1 秒冷却
 					ApplyClearOnNewLevelSetting();  // ★ v1.1.4：换关时是否清除所有植物选择
+					ApplyAllowPlantMoveSetting();   // ★ v1.3.0：时停中是否允许搬植物
 					Info("时停快捷键已挂载：" + ReadHotkey());
 				}
 			}
@@ -783,6 +784,15 @@ public void Initialize(XWModRuntimeContext context)
 			}
 
 			InvokeMethod(mapFeature, "ProcessInput");
+
+			// ★ v1.3.0：时停中允许搬植物 —— 逻辑上面 `ProcessInput()` 已经在跑
+			//   （它内部就包含 `TowerDefenseMowerManager.ProcessMowerInput` 的"整格搬移"
+			//     与 `PacketPickControl.ProcessTools` 的手套/铲子工具流），
+			//   缺的只有**视觉**：见 `UnfreezePlantMoveVisuals` 的说明。
+			if (AllowPlantMoveDuringStop)
+			{
+				UnfreezePlantMoveVisuals();
+			}
 		}
 		catch (Exception ex)
 		{
@@ -792,6 +802,170 @@ public void Initialize(XWModRuntimeContext context)
 				Warn("驱动种植异常（本条只报一次）：" + ex.Message);
 			}
 		}
+	}
+
+	// ================================================================ 时停中搬植物（v1.3.0）
+
+	/// <summary>配置键：时停中是否允许搬植物。</summary>
+	private const string KAllowPlantMove = "allowPlantMoveDuringStop";
+
+	/// <summary>★ v1.3.0：时停中允许搬植物（默认开；关掉 = 回到 1.2.3 行为）。</summary>
+	internal static bool AllowPlantMoveDuringStop = true;
+
+	/// <summary>缓存：`TowerDefenseMowerManager._previewTween`（拖拽预览跟随鼠标的 Tween）。</summary>
+	private static System.Reflection.FieldInfo _fiPreviewTween;
+
+	/// <summary>缓存：`TowerDefenseCharacter._cellMoveTween`（整格搬移时角色滑到新格的 Tween）。</summary>
+	private static System.Reflection.FieldInfo _fiCellMoveTween;
+
+	/// <summary>是否已经尝试解析过上面两个字段（解析失败也不再反复重试）。</summary>
+	private static bool _tweenFieldsResolved;
+
+	/// <summary>放行失败只报一次，避免刷日志。</summary>
+	private static bool _unfreezeWarned;
+
+	/// <summary>从配置读「时停中允许搬植物」（缺省 true，兼容老配置）。</summary>
+	private void ApplyAllowPlantMoveSetting()
+	{
+		try
+		{
+			object v = (_context == null) ? null : _context.Settings.Get<object>(KAllowPlantMove);
+			if (v == null) { return; }   // 老版本没这个键 ⇒ 保持默认开
+			if (v is bool b) { AllowPlantMoveDuringStop = b; return; }
+			if (v is string s && bool.TryParse(s, out bool sb)) { AllowPlantMoveDuringStop = sb; return; }
+			if (v is System.Text.Json.JsonElement je)
+			{
+				if (je.ValueKind == System.Text.Json.JsonValueKind.True) { AllowPlantMoveDuringStop = true; }
+				else if (je.ValueKind == System.Text.Json.JsonValueKind.False) { AllowPlantMoveDuringStop = false; }
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>
+	/// ★ v1.3.0（用户要求：时停期间要能移动植物）。
+	///
+	/// ── 为什么"逻辑"不用改，只有"视觉"要救 ────────────────────────────
+	/// `DrivePlanting()` 每帧手工驱动 `TowerDefenseBattleFeatureMap.ProcessInput()`，
+	/// 而它内部（`TowerDefenseBattleFeatureMap.cs:1319-1358`）本来就把两条搬植物通道都带上了：
+	///   · `TowerDefenseMowerManager.ProcessMowerInput()`（:1350）—— **射击模式**的"整格搬移"，
+	///     门槛是 `TowerDefenseCellInstance.CanMowerMove()`（:1821，即关卡给植物设了 `CanMowerMove`）；
+	///   · `PacketPickControl.ProcessTools()`（:1354）—— 手套 / 铲子工具流。
+	/// 且 `ProcessInput` 体内**没有暂停判定**，`IsGameRunning()` 也只看 `currentControl.isGameRunning`
+	/// 这个普通字段（`TowerDefenseManager.cs:1462-1469`，不看 paused）⇒ 暂停中它照跑。
+	///
+	/// 真正的问题是**动画**：宿主给这两处建的 Tween 都没设 pause mode
+	///   · `TowerDefenseCellInstance.CreateCharacterCellMoveTween()`（:1854-1877）
+	///     —— `character.CreateTween()` 只 `SetProcessMode(Physics)`，**从没 `SetPauseMode`**
+	///     ⇒ 默认 `TweenPauseMode.Bound` ⇒ 跟随暂停；
+	///   · `TowerDefenseMowerManager._previewTween`（:15）同理。
+	/// 而 `MoveToCell`/`MoveCharacterToCell` 里 `character.gridPos` 是**立刻改**的
+	/// （`TowerDefenseCellInstance.cs:1918` / `:1897`），Tween 只负责视觉
+	/// ⇒ 暂停时"逻辑已经搬到新格、画面还留在原地"，解冻后才滑过去，玩家会以为没搬动。
+	///
+	/// ── 本方法的做法（最小侵入）────────────────────────────────────
+	/// 只把**这两个正在用的 Tween** 的 `PauseMode` 幂等置为 `Process`，用完不 Kill。
+	/// **不设任何节点 `ProcessMode`、不碰 `Paused`、不碰波次/僵尸/植物状态机**
+	/// ⇒ 僵尸、波次、植物攻击与生产照旧完全冻结（时停语义不破）。
+	/// </summary>
+	private void UnfreezePlantMoveVisuals()
+	{
+		try
+		{
+			if (_tree == null || !GodotObject.IsInstanceValid(_tree) || !_tree.Paused) { return; }
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr)) { return; }
+			ResolveTweenFields(mgr);
+			if (_fiPreviewTween == null && _fiCellMoveTween == null) { return; }
+
+			// ① 拖拽预览（射击模式整格搬移全程靠它跟着鼠标/方向键走）
+			if (_fiPreviewTween != null)
+			{
+				try
+				{
+					GodotObject mm = mgr.GetMowerManager();
+					if (mm != null && GodotObject.IsInstanceValid(mm))
+					{
+						UnfreezeTween(_fiPreviewTween.GetValue(mm));
+					}
+				}
+				catch { }
+			}
+
+			// ② 角色滑到新格子的位移动画（按帧复用 `ForwardToMousePressComponents` 那份缓存）
+			if (_fiCellMoveTween != null)
+			{
+				long frame = _tree.GetFrame();
+				if (_cachedCharacters == null || _cachedCharFrame != frame)
+				{
+					_cachedCharacters = mgr.GetCharacter();
+					_cachedCharFrame = frame;
+				}
+				if (_cachedCharacters != null)
+				{
+					foreach (Variant item in _cachedCharacters)
+					{
+						if (!(item.AsGodotObject() is TowerDefenseCharacter ch)
+							|| !GodotObject.IsInstanceValid(ch))
+						{
+							continue;
+						}
+						UnfreezeTween(_fiCellMoveTween.GetValue(ch));
+					}
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			if (!_unfreezeWarned)
+			{
+				_unfreezeWarned = true;
+				Warn("时停中放行搬植物动画失败（本条只报一次）：" + ex.Message);
+			}
+		}
+	}
+
+	/// <summary>解析并缓存两个私有 Tween 字段（只试一次；拿不到就静默降级为"逻辑能搬、动画不解冻"）。</summary>
+	private void ResolveTweenFields(TowerDefenseManager mgr)
+	{
+		if (_tweenFieldsResolved) { return; }
+		_tweenFieldsResolved = true;
+		const System.Reflection.BindingFlags BF = System.Reflection.BindingFlags.NonPublic
+			| System.Reflection.BindingFlags.Instance;
+		try
+		{
+			_fiCellMoveTween = typeof(TowerDefenseCharacter).GetField("_cellMoveTween", BF);
+		}
+		catch { _fiCellMoveTween = null; }
+		try
+		{
+			GodotObject mm = mgr.GetMowerManager();
+			if (mm != null && GodotObject.IsInstanceValid(mm))
+			{
+				_fiPreviewTween = mm.GetType().GetField("_previewTween", BF);
+			}
+		}
+		catch { _fiPreviewTween = null; }
+		if (_fiCellMoveTween == null && _fiPreviewTween == null)
+		{
+			Warn("反射拿不到 _cellMoveTween / _previewTween（游戏更新了？）"
+				+ "时停中搬植物仍可用，只是没有滑动动画。");
+		}
+	}
+
+	/// <summary>幂等放行单个 Tween：只改 pause mode，不 Kill、不重播。</summary>
+	private static void UnfreezeTween(object tweenObj)
+	{
+		try
+		{
+			// ⚠️ Godot 4 的 C# 绑定里 `Tween` **没有** `PauseMode` 属性，只有 `SetPauseMode()`；
+			//    宿主自己也是这么写的（`DestroyComponent.cs:236` `CreateTween().SetPauseMode(...)`）。
+			if (tweenObj is Tween tw && tw.IsValid())
+			{
+				tw.SetPauseMode(Tween.TweenPauseMode.Process);
+			}
+		}
+		catch { }
 	}
 
 	private bool _driveFaultReported;
@@ -1927,6 +2101,12 @@ public void Initialize(XWModRuntimeContext context)
 				{
 					ApplyClearOnNewLevelSetting();
 					Info("换新关卡时清除所有植物选择已" + (ClearTriggersOnNewLevel ? "开启" : "关闭（保留勾选）"));
+				}
+				// ★ v1.3.0：时停中允许搬植物开关改了 ⇒ 立即生效（下次进时停就用新值）
+				if (k == KAllowPlantMove)
+				{
+					ApplyAllowPlantMoveSetting();
+					Info("时停中搬植物已" + (AllowPlantMoveDuringStop ? "开启" : "关闭（回到旧行为）"));
 				}
 				if (k == "style") { styleChanged = true; }
 			}

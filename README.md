@@ -1,5 +1,10 @@
 # 时停（TimeStop）Mod
 
+> **v1.3.0（2026-11-08）**：**时停中也能搬植物了**（新配置「时停中允许搬植物」，默认开）。
+> ① **原生「整格搬移」**——射击模式（`Shooting` 关卡，给植物设了 `CanMowerMove`）以及少数允许移动的挑战/杂交乐园关卡，
+> 时停中按住植物格拖动即可整格连植物一起挪走，也支持方向键逐格挪；② **手套**搬植物（需装「手套」Mod）。
+> 僵尸 / 波次 / 植物攻击与生产**仍然完全冻结**（不设任何节点 `ProcessMode`、不改 `Paused`）。
+
 > **v1.2.3（2026-11-01）**：修「战斗设置页里改的设置当时生效、重启后失效」——保存改为入队重试 + 落盘后回读自证 + 不受日志开关门控的 `设置落盘/整批保存被拒` 日志。
 
 在《植物大战僵尸杂交版》游戏内**「加速」按钮的正下方**新增「时停」两个字，
@@ -9,10 +14,10 @@
 - **触发中** → 红色
 
 效果 = **和游戏自带"自动暂停"一样冻结整个世界**（僵尸 / 子弹 / 植物 / 飘落阳光全部静止），
-但**仍能种植植物、铲除植物、收集阳光金币**。
+但**仍能种植植物、铲除植物、收集阳光金币**；v1.3.0 起**还能搬植物**（原生整格搬移 + 手套，见下方版本历史）。
 
 - Mod ID：`timestop`
-- 版本：**1.2.3**
+- 版本：**1.3.0**
 
 > 完整版本历史见文末「版本历史」一节。
 - 入口类：`TimeStopEntry`（v1.1.0 起为 `partial`，面板部分在 `runtime_src/TimeStopPanel.cs`）
@@ -102,6 +107,7 @@ armBlocked（开场保护）   = 换关/换卡槽实例后置真，直到该槽�
 
 | 版本 | 变更 |
 | --- | --- |
+| **1.3.0** | ★ **时停中也能搬植物**（新配置 `allowPlantMoveDuringStop`，group=功能，默认开，immediate）。① 原生**整格搬移**：射击模式（`Shooting` 关卡，关卡 `PacketBank` 里给植物设了 `CanMowerMove`；30/30 个 Shooting 关卡都设了，其余 1220 个关卡只有 7 个）按在植物格上拖动 ⇒ `mapCell.MoveToCell(cell)` 整格连植物一起搬，也支持方向键逐格挪；② **手套**搬植物（需装「手套」Mod，由它在暂停下接管预览/热键）。<br>实现要点：时停本来就在每帧手工驱动 `TowerDefenseBattleFeatureMap.ProcessInput()`（`:1319-1358` 内含 `TowerDefenseMowerManager.ProcessMowerInput` 与 `PacketPickControl.ProcessTools`），体内**没有暂停判定**、`IsGameRunning()` 也只看 `currentControl.isGameRunning` 字段 ⇒ 搬移的**逻辑**早就在跑；缺的只是**视觉** —— 宿主 `TowerDefenseCellInstance.CreateCharacterCellMoveTween`（`:1854-1877`）与 `TowerDefenseMowerManager._previewTween` 建的 Tween **都没设 `SetPauseMode`** ⇒ 默认跟随暂停，而 `gridPos` 是立刻改的 ⇒ 暂停时"逻辑搬了、画面不动"。现在只把**正在搬的那两个 Tween** 的 pause mode 幂等放行为 `Process`（反射 `TowerDefenseCharacter._cellMoveTween` / `MowerManager._previewTween`，用完不 Kill）。<br>**底线**：不设任何节点 `ProcessMode`、不改 `Paused`、不碰波次/僵尸/植物状态机 ⇒ 冻结语义不破。关掉该开关 = 完全回到 1.2.3 行为。 |
 | **1.2.2** | ★ **修复「游戏还没正式开始也能用时报停把游戏冻住」**：此前按钮显隐由 `IsInBattle()`（`currentControl.isGameRunning`）把关，但**快捷键 / 复选框 / 卡槽自动触发**这条链（`OnHotkeyTick` → `ApplyToggle` → `Engage`）**没有任何入口检查** ⇒ 选卡 / 关卡预览阶段按快捷键就把 `_tree.Paused` 置真，而主扫描的 `MaintainTimeStop()` 每轮又把 Paused 校回 true，关卡状态机（`GameEntry → GameReady → GameRunning`）跑不动 ⇒ 表现为「卡死在开场」。新增 `BattleStarted()` 双重判据（`TowerDefenseManager.Instance.IsGameRunning()` + 卡槽 `hasGameStarted`），在 **`Engage()` 这一个收口**上拒绝未开打的冻结（并同步回视觉「关」）。另修：时停开着时过关 / 失败 / 退出关卡不会自动解除，进下一个关卡开场带着残留冻结 —— `MaintainTimeStop()` 每轮复核，战斗一旦不在进行中立即 `Disengage()` 并还原 `Paused`。另：**面板呼出键**（`PanelHotkeyTick` 走的是 `OnHotkeyTick`，不受 `PanelTick` 那道「关卡内才允许存在」的门禁约束）未开打时也能把面板叫出来，而面板一打开就 `PauseWhilePanel()` 冻结游戏 —— `SetPanelVisible(true)` 补了同一道门禁（关闭照旧放行）。 |
 | **1.1.4** | ① 面板「自动解除时停」滑动条上限 **60 秒 → 15 秒**（`AutoResumeMaxSec`，配置页 `autoResumeSec.max` 同步为 15）。② 面板底部新增 **「清除所有选择」** 按钮：一键取消全部 16 槽勾选（`ClearAllSlotTriggers()`），之后所有植物 CD 完成后不再触发自动时停。③ 新增配置项 **`clearTriggersOnNewLevel`（读取新关卡时清除所有植物选择，默认关）**：打开后读取新关卡（含重打当前关卡）自动清空全部勾选；判据是 `WatchSlotTriggers()` 里 `bank.GetInstanceId()` 变化，**首次进关不算**（`firstWatch` 跳过，避免开局清掉刚勾好的卡）。 |
 | **1.1.3** | 新增配置项 **`buttonCooldown`（点击按钮有 1 秒切换冷却，默认开）**：关掉后点击「时停」按钮 / 勾复选框也可以连续快点，不再等 1 秒；快捷键始终不受冷却限制。`PassToggleGate()` 开头判该开关（`TimeStopEntry.cs`）。改完立即生效。 |
