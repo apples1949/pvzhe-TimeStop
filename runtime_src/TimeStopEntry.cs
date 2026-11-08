@@ -347,6 +347,19 @@ public void Initialize(XWModRuntimeContext context)
 			DrivePlanting();
 			CollectDroppablesAtMouse();
 			RefreshPacketCooldownUi();
+			// ★ v1.3.1：卡带 / 选卡栏的**鼠标拖动滚动**（轮询，不依赖输入事件通道）
+			DriveScrollDragPolling();
+			// ★ v1.3.1：传送带卡带的尺寸/可滚开关每 60 物理帧补刷一次
+			//   （`ConveyorBeltManager._Process` 里的 `RefreshCardScrolls()` 暂停后不再跑，
+			//    内容尺寸陈旧会把 `ScrollHorizontal` 夹在旧上限内）。
+			//   ⚠️ 审阅 S2：刷新不能太勤 —— `ConfigureScrolling(enabled:false,…)` 会把滚动值清零，
+			//   频繁刷会让"滚到一半被打回 0"更容易撞上；60 帧 ≈ 1 秒足够。
+			if ((++_scrollRefreshTick % 60) == 0)
+			{
+				RefreshConveyorCardScrolls();
+			}
+			// ★ v1.3.1：预热卡带缓存（输入事件里要按它做命中/滚动，不能现场全树扫）
+			RefreshCardScrollCache(false);
 		}
 		catch (Exception ex)
 		{
@@ -596,6 +609,783 @@ public void Initialize(XWModRuntimeContext context)
 				_faultReported = true;
 				Warn("扫描异常（本条只报一次）：" + ex.Message);
 			}
+		}
+	}
+
+	// ================================================================ 时停中滚动卡带（v1.3.1）
+
+	/// <summary>
+	/// ★★ v1.3.1（玩家反馈 2026-11-08）。
+	///
+	/// ── 症状 ──────────────────────────────────────────────────────
+	/// **10-10 关卡**（同时有 `PacketBank` + `ConveyorBelt` + `SeedBank` 三个特性）：
+	/// 时停期间**滚轮滚不动、拖也拖不动**卡带 ⇒ 够不到被挡住的卡 ⇒ "切不了卡"。
+	///
+	/// ── 真因（解包源码逐条核对）────────────────────────────────────
+	/// ① 只要「卡槽」与「传送带」**同时存在**，宿主就走
+	///    `TowerDefenseCoexistHud`（`unpack\Scene\TowerDefesne\TowerDefenseNew\TowerDefenseCoexistHud.cs`）：
+	///    `RegisterBank()`(:84) 给**每一个** bank 节点套一层 `TowerDefenseCardScroll`，
+	///    `Mount()`(:430) 再调 `ConfigureScrolling(scrollable, vertical)`(:438) ——
+	///    里面把 `HorizontalScrollMode / VerticalScrollMode` 设成 **3 = SHOW_NEVER**
+	///    ⇒ **滚动条一律不画**，只剩「滚轮」和「拖拽」两条路。
+	/// ② 传送带自己的卡带则在 `ConveyorBeltManager._Ready()`(:206-212) 里
+	///    `InstallCardScroll()` 另建 `TowerDefenseCardScroll`，
+	///    可见性由 `_Process → RefreshCardScrolls()` 按"卡片数 × 53/61 + 7 > 可视宽高"开关。
+	/// ③ **滚轮与拖拽全部实现在 `TowerDefenseCardScroll._Input()`**（:47-123，
+	///    `_input` 回调，命中用 `GetGlobalRect().HasPoint(ev.Position)`，直接改
+	///    `ScrollHorizontal / ScrollVertical`，拖拽时还会 `PacketPickControl.Release()`）。
+	/// ④ 本 Mod 用 `SceneTree.Paused = true` 冻结世界 ⇒ 该节点的 `Node::can_process()`
+	///    为 false ⇒ 引擎的 `_input` 派发（`SceneTree::_call_input_pause` 逐节点判
+	///    `can_process()`）**根本不会调它** ⇒ 滚轮/拖拽静默失效。
+	///    （正常游玩时一切正常，所以这个 bug 只在时停期间出现，且只在"卡带真的溢出"的关卡
+	///      ——10-10 的传送带会堆到十几张卡 —— 才看得见。）
+	///
+	/// ── 为什么不用 `ProcessMode = Always` 修 ─────────────────────────
+	/// `ProcessMode` 是**向下继承**的：把卡带设成 `Always`，它下面的
+	/// 卡槽 / 卡片 / AnimatedSprite 整棵子树都会解析成 `Always` ⇒
+	/// 卡片 `_PhysicsProcess` 里的 CD 计数、动画播放全部解冻 ⇒ **时停语义被破**。
+	///
+	/// ── 修法 ──────────────────────────────────────────────────────
+	/// `TowerDefenseCardScroll._Input()` 是 `public override` ⇒ 本 Mod 直接在
+	/// `Window.WindowInput`（暂停时照样发）里**把事件原样喂给它**，
+	/// 等于跑宿主自己的滚动实现（含 `Release()` 与 `SetInputAsHandled()`）——
+	/// **滚轮与触摸拖动**与不暂停时完全一致；不改任何节点的 `ProcessMode`、不碰波次/角色状态机。
+	/// 另外两处是"宿主本来就没有"的补充，属于**增强**而非还原，见各自注释：
+	///   · 鼠标拖动（宿主 `_Input` 只认触摸，PC 上原本完全不能拖）—— 物理帧轮询，带 16px 起步死区；
+	///   · 选卡栏面板的普通 `ScrollContainer` 滚轮/拖动（原生 GUI 派发被暂停门控）。
+	///
+	/// 另外补一条「按下落在可滚动卡带上 ⇒ 等松手再选卡」（宿主口径：
+	/// `ScrollDeadzone = 16`；卡池拖拽选卡是 24px），否则"想拖一下滚轮/滑一下"
+	/// 会顺手把按下点的卡选中，反而更难受。
+	/// </summary>
+
+	/// <summary>缓存的可滚动卡带（宿主 `TowerDefenseCardScroll`：卡槽栏 / 传送带卡带 / 共存 HUD）。</summary>
+	private readonly List<TowerDefenseCardScroll> _cardScrolls = new List<TowerDefenseCardScroll>();
+
+	/// <summary>上次刷新卡带缓存的帧号（节流：卡带随 HUD 布局重建，没必要每个输入事件全树扫）。</summary>
+	private long _cardScrollsFrame = -1;
+
+	/// <summary>卡带滚动转发异常只报一次。</summary>
+	private bool _scrollFaultReported;
+
+	/// <summary>卡带滚动诊断计数（受 <see cref="EnablePickDiag"/> 门控）。</summary>
+	private int _scrollDiag;
+
+	/// <summary>按下落在可滚动卡带上、还没判定的那次「选卡」。</summary>
+	private bool _deferredPickPending;
+
+	/// <summary>松手时判定为「点击」⇒ 让 `DriveUiPicks()` 补做一次选卡。</summary>
+	private bool _deferredPickFire;
+
+	/// <summary>按下后移动超过阈值 ⇒ 视为「拖动滚动」，本次不选卡。</summary>
+	private bool _deferredPickCancelled;
+
+	/// <summary>按下瞬间的视口坐标（判拖动距离用）。</summary>
+	private Vector2 _deferredPickPos;
+
+	/// <summary>拖动阈值（与宿主 `TowerDefenseCardScroll.ScrollDeadzone = 16` 同口径）。</summary>
+	private const float ScrollDragThreshold = 16f;
+
+	/// <summary>
+	/// 刷新卡带缓存（全树搜 `TowerDefenseCardScroll`）。
+	/// <para>`force=false` 时节流 30 帧；`force=true` 用于「时停开启那一刻」。</para>
+	/// </summary>
+	private void RefreshCardScrollCache(bool force)
+	{
+		try
+		{
+			if (_tree == null || !GodotObject.IsInstanceValid(_tree) || _tree.Root == null)
+			{
+				return;
+			}
+			long f = _tree.GetFrame();
+			if (!force && _cardScrollsFrame >= 0 && f - _cardScrollsFrame < 30)
+			{
+				return;
+			}
+			_cardScrollsFrame = f;
+			var found = new List<Node>();
+			// ★ v1.3.1（审阅 S1）：上限从 8 提到 32 —— 实际数量已达 7（传送带 3 + 共存 HUD 最多 4），
+			//   `CollectByClassName` 达上限即提前 return，再多一个就会静默漏掉。
+			CollectByClassName(_tree.Root, 0, "TowerDefenseCardScroll", found, 32);
+			_cardScrolls.Clear();
+			foreach (Node n in found)
+			{
+				if (n is TowerDefenseCardScroll sc && GodotObject.IsInstanceValid(sc))
+				{
+					_cardScrolls.Add(sc);
+				}
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>
+	/// ★ v1.3.1 核心：把**视口坐标**的输入事件原样喂给宿主自己的 `TowerDefenseCardScroll._Input()`。
+	/// <para>它自带命中判定（`GetGlobalRect().HasPoint`）、溢出判定（`CardsOverflow()`）、
+	/// 可见性判定（`IsVisibleInTree()`）与 `ScrollingEnabled` 开关 ⇒ 本方法只负责"叫醒它"。</para>
+	/// </summary>
+	private void ForwardToCardScrolls(InputEvent vpEvent)
+	{
+		if (vpEvent == null)
+		{
+			return;
+		}
+		RefreshCardScrollCache(false);
+		if (_cardScrolls.Count == 0)
+		{
+			return;
+		}
+		int hits = 0;
+		for (int i = 0; i < _cardScrolls.Count; i++)
+		{
+			TowerDefenseCardScroll sc = _cardScrolls[i];
+			if (sc == null || !GodotObject.IsInstanceValid(sc))
+			{
+				continue;
+			}
+			if (!sc.IsInsideTree() || !sc.IsVisibleInTree() || !sc.ScrollingEnabled)
+			{
+				continue;
+			}
+			try
+			{
+				// 直调 = 跑宿主自己的"滚轮 / 触摸拖拽"实现（v1.3.1 的关键）
+				sc._Input(vpEvent);
+				hits++;
+			}
+			catch (Exception ex)
+			{
+				if (!_scrollFaultReported)
+				{
+					_scrollFaultReported = true;
+					Warn("卡带滚动转发失败（本条只报一次）：" + ex.Message);
+				}
+			}
+		}
+		if (EnablePickDiag && _scrollDiag < 20
+			&& vpEvent is InputEventMouseButton wheel && wheel.ButtonIndex != MouseButton.Left)
+		{
+			_scrollDiag++;
+			PickDiag("SCROLL 滚轮：候选卡带 " + _cardScrolls.Count + " 个，喂入 " + hits + " 个。");
+		}
+	}
+
+	/// <summary>给定视口坐标，返回命中的「可滚动卡带」（没有则 null）。</summary>
+	private TowerDefenseCardScroll GetScrollableStripAt(Vector2 vpPos)
+	{
+		try
+		{
+			RefreshCardScrollCache(false);
+			for (int i = 0; i < _cardScrolls.Count; i++)
+			{
+				TowerDefenseCardScroll sc = _cardScrolls[i];
+				if (sc == null || !GodotObject.IsInstanceValid(sc))
+				{
+					continue;
+				}
+				if (!sc.ScrollingEnabled || !sc.IsInsideTree() || !sc.IsVisibleInTree())
+				{
+					continue;
+				}
+				if (HitControlInCanvasAt(sc, vpPos))
+				{
+					return sc;
+				}
+			}
+		}
+		catch { }
+		return null;
+	}
+
+	// ---- v1.3.1 第二段：通用 ScrollContainer（选卡栏面板的纵向滚动条） ----------
+
+	/// <summary>正在被本 Mod 相对拖动滚动的容器（null = 没在拖）。</summary>
+	private ScrollContainer _dragScroll;
+
+	/// <summary>按下时命中的候选容器（超过起步死区才升级成 <see cref="_dragScroll"/>）。</summary>
+	private ScrollContainer _dragCandidate;
+
+	/// <summary>按下瞬间的位置（起步死区判定）。</summary>
+	private Vector2 _dragStartPos;
+
+	/// <summary>当前是否有手指按在屏幕上（触摸拖动交给宿主 `_Input`，本 Mod 不叠加）。</summary>
+	private bool _touchActive;
+
+	/// <summary>上一次轮询/事件时的鼠标位置（视口坐标）。</summary>
+	private Vector2 _dragPrevPos;
+
+	/// <summary>上一物理帧左键是否按下（拖动起始的边沿判定）。</summary>
+	private bool _scrollPrevDown;
+
+	/// <summary>补刷传送带卡带的节流计数器。</summary>
+	private int _scrollRefreshTick;
+
+	/// <summary>窗口输入中继的收包计数（诊断用，只报前 5 条）。</summary>
+	private int _scrollEventDiag;
+
+	/// <summary>滚轮一格的像素步长兜底值（实际步长按宿主口径 `page/8` 算，见 `DriveScrollWheel`）。</summary>
+	private const int WheelStepHorizontal = 51;
+	private const int WheelStepVertical = 62;
+
+	/// <summary>取「选卡栏」UI 本体（`TowerDefenseInGamePacketBank`）。</summary>
+	private TowerDefenseInGamePacketBank GetPacketBank()
+	{
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				return null;
+			}
+			TowerDefenseBattleFeaturePacketBank feature = mgr.GetPacketBankFeature();
+			if (feature == null || !GodotObject.IsInstanceValid(feature))
+			{
+				return null;
+			}
+			TowerDefenseInGamePacketBank bank = feature.packetBank;
+			if (bank == null || !GodotObject.IsInstanceValid(bank))
+			{
+				return null;
+			}
+			return bank;
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	/// <summary>
+	/// 取「选卡栏（`TowerDefenseInGamePacketBank`）」的滚动容器。
+	/// <para>链路：`TowerDefenseManager.GetPacketBankFeature()` → `feature.packetBank`
+	/// → `packetBank.packetBankScroll`（三者都是 public，解包源码实证：
+	/// `TowerDefenseBattleFeaturePacketBank.cs:15`、`TowerDefenseInGamePacketBank.cs:24`）。</para>
+	/// </summary>
+	private ScrollContainer GetPacketBankScroll()
+	{
+		try
+		{
+			TowerDefenseInGamePacketBank bank = GetPacketBank();
+			if (bank == null)
+			{
+				return null;
+			}
+			ScrollContainer sc = bank.packetBankScroll;
+			if (sc == null || !GodotObject.IsInstanceValid(sc))
+			{
+				return null;
+			}
+			return sc;
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	/// <summary>
+	/// 某个滚动容器当前在哪个轴上还有可滚空间。
+	/// <para>★ v1.3.1（审阅 M1）：**不用 `ScrollBar.MaxValue/Page` 当主判据** —— 被
+	/// `ConfigureScrolling` 关掉或设成 `SHOW_NEVER` 的轴，其 `Range` 不可靠
+	/// （未赋值的轴保持默认 `Max=100 / Page=0` ⇒ 恒判"可滚"）。
+	/// 这里照抄宿主自己的口径（`TowerDefenseCardScroll.CardsOverflow()`：
+	/// 用「内容 Size vs 容器 Size」比），与游戏行为 100% 对齐。</para>
+	/// </summary>
+	private static void GetScrollAxes(ScrollContainer sc, out bool vertical, out bool horizontal)
+	{
+		vertical = false;
+		horizontal = false;
+		try
+		{
+			if (sc == null || !GodotObject.IsInstanceValid(sc))
+			{
+				return;
+			}
+			Control content = sc.GetChildOrNull<Control>(0);
+			if (content == null)
+			{
+				return;
+			}
+			Vector2 cs = content.Size;
+			Vector2 ss = sc.Size;
+			if (sc is TowerDefenseCardScroll card)
+			{
+				// 卡带：宿主 `CardsOverflow()` 只按 `Vertical` 选一个轴
+				if (card.Vertical)
+				{
+					vertical = cs.Y > ss.Y + 0.5f;
+				}
+				else
+				{
+					horizontal = cs.X > ss.X + 0.5f;
+				}
+				return;
+			}
+			// 通用 `ScrollContainer`：被 `Disabled` 的轴绝不滚，再用尺寸判是否溢出
+			if (sc.VerticalScrollMode != ScrollContainer.ScrollMode.Disabled && cs.Y > ss.Y + 0.5f)
+			{
+				vertical = true;
+			}
+			if (sc.HorizontalScrollMode != ScrollContainer.ScrollMode.Disabled && cs.X > ss.X + 0.5f)
+			{
+				horizontal = true;
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>按像素增量滚动（纵向优先；横向兜底）。</summary>
+	private static void ApplyScrollDelta(ScrollContainer sc, Vector2 delta)
+	{
+		try
+		{
+			if (sc == null || !GodotObject.IsInstanceValid(sc))
+			{
+				return;
+			}
+			GetScrollAxes(sc, out bool vOk, out bool hOk);
+			if (vOk && (!hOk || Math.Abs(delta.Y) >= Math.Abs(delta.X)))
+			{
+				sc.ScrollVertical += (int)Math.Round(delta.Y);
+			}
+			else if (hOk)
+			{
+				sc.ScrollHorizontal += (int)Math.Round(delta.X);
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>命中哪个「可滚动容器」——先查卡带（更具体），再查选卡栏面板。</summary>
+	private ScrollContainer FindScrollContainerAt(Vector2 vpPos)
+	{
+		TowerDefenseCardScroll card = GetScrollableStripAt(vpPos);
+		if (card != null)
+		{
+			return card;
+		}
+		try
+		{
+			ScrollContainer pb = GetPacketBankScroll();
+			if (pb != null && pb.IsInsideTree() && pb.IsVisibleInTree() && HitControlInCanvasAt(pb, vpPos))
+			{
+				GetScrollAxes(pb, out bool vOk, out bool hOk);
+				if (vOk || hOk)
+				{
+					return pb;
+				}
+			}
+		}
+		catch { }
+		return null;
+	}
+
+	/// <summary>
+	/// ★ v1.3.1：**滚轮**滚动。两条路都喂：
+	///   · 卡带（`TowerDefenseCardScroll`）→ 已在 <see cref="ForwardToCardScrolls"/> 里直调宿主 `_Input`；
+	///   · 选卡栏面板（`TowerDefenseInGamePacketBank.packetBankScroll`，普通 `ScrollContainer`）
+	///     → 这里自己写 `ScrollVertical / ScrollHorizontal`。
+	/// <para>为什么要自己写：宿主的 `ScrollContainer::gui_input` 在 `Paused=true` 时被 Viewport
+	/// 门控（只判"命中的最深 Control"的 `can_process()`）⇒ 滚轮吞掉；
+	/// 而"写值"这条链是活的（`set_v_scroll` → `ScrollBar::set_value` → `ValueChanged`
+	/// → 宿主的 `QueueVirtualizedPacketRefresh()`，`CallDeferred` 暂停时照跑）。</para>
+	/// <para>⚠️ 这里**不设任何 `ProcessMode`**：一旦把滚动条设成 `Always`，原生拖动会与本 Mod
+	/// 的拖动**叠加**，变成"拖一格走两格"。</para>
+	/// </summary>
+	private void DriveScrollWheel(InputEvent vpEvent, Vector2 vpPos)
+	{
+		if (!(vpEvent is InputEventMouseButton wheel) || !wheel.Pressed)
+		{
+			return;
+		}
+		if (wheel.ButtonIndex != MouseButton.WheelUp && wheel.ButtonIndex != MouseButton.WheelDown
+			&& wheel.ButtonIndex != MouseButton.WheelLeft && wheel.ButtonIndex != MouseButton.WheelRight)
+		{
+			return;
+		}
+		ScrollContainer pb = GetPacketBankScroll();
+		if (pb == null || !pb.IsInsideTree() || !pb.IsVisibleInTree() || !HitControlInCanvasAt(pb, vpPos))
+		{
+			return;
+		}
+		GetScrollAxes(pb, out bool vOk, out bool hOk);
+		int dir = (wheel.ButtonIndex == MouseButton.WheelUp || wheel.ButtonIndex == MouseButton.WheelLeft) ? -1 : 1;
+		if (vOk)
+		{
+			// ★ v1.3.1（审阅 S3）：步长与宿主原生滚轮对齐（`ScrollContainer::gui_input` ≈ page/8），
+			//   否则"时停中滚得比平时快 19%"，手感不一致。
+			ScrollBar vb = pb.GetVScrollBar();
+			int stepY = (vb != null && GodotObject.IsInstanceValid(vb) && vb.Page > 0)
+				? Math.Max(20, (int)(vb.Page / 8.0)) : WheelStepVertical;
+			pb.ScrollVertical += dir * stepY;
+		}
+		else if (hOk)
+		{
+			ScrollBar hb = pb.GetHScrollBar();
+			int stepX = (hb != null && GodotObject.IsInstanceValid(hb) && hb.Page > 0)
+				? Math.Max(20, (int)(hb.Page / 8.0)) : WheelStepHorizontal;
+			pb.ScrollHorizontal += dir * stepX;
+		}
+		// 兜底：值没变（夹在边界）时 `ValueChanged` 不发 ⇒ 虚拟化不重绑。
+		// 这里显式再调一次（**public 方法，直接调**，审阅 S4：不必绕反射），
+		// 保证滚动到新行时卡片会被绑上/换出。
+		GetPacketBank()?.RefreshVirtualizedPacketBindings();
+		if (EnablePickDiag && _scrollDiag < 30)
+		{
+			_scrollDiag++;
+			PickDiag("SCROLL 选卡栏滚轮：" + wheel.ButtonIndex
+				+ " ⇒ 值 " + pb.ScrollVertical + "/" + pb.ScrollHorizontal);
+		}
+	}
+
+	/// <summary>
+	/// ★ v1.3.1：**鼠标拖动滚动**（每物理帧轮询；不依赖任何输入事件）。
+	/// <para>为什么用轮询：本 Mod 的程序集是手写 csproj（没跑 Godot 源码生成器），
+	/// 自定义节点重写的 `_Input` 引擎**根本不会调**（见 v1.0.14 的说明），
+	/// 而 `SceneTree.physics_frame` 信号在暂停时**照样发** ⇒ 轮询是唯一稳的通道。</para>
+	/// <para>覆盖面：卡带（宿主 `_Input` 只认触摸拖动，**不认鼠标**，这里补上）与
+	/// 选卡栏面板的 `ScrollContainer`（原生 GUI 被暂停门控，走这里）。</para>
+	/// <para>★ v1.3.1（审阅 M2）：**触摸进行中完全不动手** —— 宿主 `_Input` 的触摸拖动是
+	/// 「绝对赋值」（`Scroll = 起点 - 总位移`），而这里的是「相对累加」；Godot 默认
+	/// `emulate_mouse_from_touch = true`，手指按下时 `Input.IsMouseButtonPressed(Left)` 也为真
+	/// ⇒ 两条逻辑会互相覆盖 ⇒ 手机上会抖/回弹。</para>
+	/// <para>★ v1.3.1（审阅 S8①）：补了**起步死区 16px**（与宿主 `ScrollDeadzone` 一致），
+	/// 否则"轻点一下卡带"画面就会位移。</para>
+	/// </summary>
+	private void DriveScrollDragPolling()
+	{
+		try
+		{
+			if (_tree == null || !GodotObject.IsInstanceValid(_tree) || _tree.Root == null)
+			{
+				return;
+			}
+			Viewport vp = _tree.Root.GetViewport();
+			if (vp == null)
+			{
+				return;
+			}
+			Vector2 pos = vp.GetMousePosition();
+			bool down = Input.IsMouseButtonPressed(MouseButton.Left);
+			bool edge = down && !_scrollPrevDown;
+			_scrollPrevDown = down;
+			// 触摸进行中 ⇒ 交给宿主 `_Input`（避免绝对/相对双写）
+			if (_touchActive || !down)
+			{
+				// ★ 第2轮复核 R1 自愈：左键已松开却还留着"触摸中"标记
+				//   （触摸中时停被解除 ⇒ 抬起事件被 `_timeStopOn` 早退吞掉）⇒ 这里清掉。
+				//   触摸进行中 `down` 恒为 true（`emulate_mouse_from_touch`），不会误清。
+				if (!down)
+				{
+					_touchActive = false;
+				}
+				_dragScroll = null;
+				_dragCandidate = null;
+				_dragPrevPos = pos;
+				return;
+			}
+			if (IsOverPanel(pos))
+			{
+				_dragScroll = null;
+				_dragCandidate = null;
+				_dragPrevPos = pos;
+				return;
+			}
+			if (edge)
+			{
+				// 按下：先记"候选"，超过起步死区才真正开始滚
+				_dragCandidate = FindScrollContainerAt(pos);
+				_dragScroll = null;
+				_dragStartPos = pos;
+				_dragPrevPos = pos;
+				return;
+			}
+			Vector2 delta = pos - _dragPrevPos;
+			_dragPrevPos = pos;
+			if (_dragScroll == null)
+			{
+				if (_dragCandidate == null || !GodotObject.IsInstanceValid(_dragCandidate))
+				{
+					return;
+				}
+				if (pos.DistanceTo(_dragStartPos) < ScrollDragThreshold)
+				{
+					return;      // 还没过起步死区
+				}
+				_dragScroll = _dragCandidate;
+				delta = Vector2.Zero;   // 起步那一段不一次性补
+			}
+			if (!GodotObject.IsInstanceValid(_dragScroll))
+			{
+				_dragScroll = null;
+				_dragCandidate = null;
+				return;
+			}
+			if (!_dragScroll.IsInsideTree() || !_dragScroll.IsVisibleInTree())
+			{
+				_dragScroll = null;
+				_dragCandidate = null;
+				return;
+			}
+			if (delta == Vector2.Zero)
+			{
+				return;
+			}
+			ApplyScrollDelta(_dragScroll, -delta);
+		}
+		catch (Exception ex)
+		{
+			if (!_scrollFaultReported)
+			{
+				_scrollFaultReported = true;
+				Warn("拖动滚动异常（本条只报一次）：" + ex.Message);
+			}
+		}
+	}
+
+
+	/// <summary>
+	/// ★ v1.3.1：时停开启那一刻的滚动面自检（受 `enableLog` 门控）。
+	/// <para>玩家反馈时一眼能看出"到底哪个面在滚、有没有溢出"，省一轮来回。</para>
+	/// </summary>
+	private void ReportScrollSurfaces()
+	{
+		try
+		{
+			if (!EnableInfoLog)
+			{
+				return;
+			}
+			RefreshCardScrollCache(true);
+			string cards = "";
+			for (int i = 0; i < _cardScrolls.Count && i < 4; i++)
+			{
+				TowerDefenseCardScroll sc = _cardScrolls[i];
+				if (sc == null || !GodotObject.IsInstanceValid(sc))
+				{
+					continue;
+				}
+				GetScrollAxes(sc, out bool vOk, out bool hOk);
+				Control content = sc.GetChildOrNull<Control>(0);
+				cards += " [卡带" + i + " name=" + sc.Name
+					+ " 可见=" + sc.IsVisibleInTree()
+					+ " 可滚=" + sc.ScrollingEnabled
+					+ " 纵=" + vOk + " 横=" + hOk
+					+ " 尺寸=" + sc.Size
+					+ " 内容=" + (content != null ? content.Size.ToString() : "-")
+					+ " 值=" + sc.ScrollVertical + "/" + sc.ScrollHorizontal + "]";
+			}
+			ScrollContainer pb = GetPacketBankScroll();
+			string panel;
+			if (pb == null)
+			{
+				panel = "<null>";
+			}
+			else
+			{
+				GetScrollAxes(pb, out bool vOk2, out bool hOk2);
+				Node tr = pb.GetParent()?.GetParent();   // Translate 的位置（600 = 屏外）
+				float ty = (tr is Control c) ? c.Position.Y : float.NaN;
+				panel = "可见=" + pb.IsVisibleInTree() + " TranslateY=" + ty
+					+ " 纵=" + vOk2 + " 横=" + hOk2
+					+ " 条Max/Page=" + pb.GetVScrollBar().MaxValue + "/" + pb.GetVScrollBar().Page;
+			}
+			Info("SCROLL 自检：卡带 " + _cardScrolls.Count + " 个：" + (cards == "" ? "（无）" : cards)
+				+ " ｜ 选卡栏=" + panel);
+		}
+		catch (Exception ex)
+		{
+			Warn("SCROLL 自检异常（已吞）：" + ex.Message);
+		}
+	}
+
+	/// <summary>
+	/// ★ v1.3.1：把传送带的卡带尺寸/可滚开关补刷一次。
+	/// <para>`ConveyorBeltManager.RefreshCardScrolls()` 是 private 且在 `_Process` 里跑，
+	/// 暂停后不再更新 ⇒ 不补刷的话卡片增减后 `Content.Size` 陈旧，
+	/// `ScrollHorizontal` 会被 `Range` 夹在**旧上限**内（滚到一半就停）。</para>
+	/// <para>★ v1.3.1（审阅 S2）：反射失败时**降级自救 + 报一次日志** ——
+	/// 反射被 `InvokeMethod` 静默吞掉的话，卡带会永远停在"不可滚"或旧尺寸上，
+	/// 玩家只会看到"拖不动"却拿不到任何线索。降级动作 = 宿主同款 `ConfigureScrolling`。</para>
+	/// </summary>
+	private void RefreshConveyorCardScrolls()
+	{
+		try
+		{
+			if (_tree == null || !GodotObject.IsInstanceValid(_tree) || _tree.Root == null)
+			{
+				return;
+			}
+			var found = new List<Node>();
+			CollectByClassName(_tree.Root, 0, "ConveyorBeltManager", found, 4);
+			for (int i = 0; i < found.Count; i++)
+			{
+				InvokeMethod(found[i], "RefreshCardScrolls");
+			}
+			// 降级兜底：宿主口径是"内容溢出就开滚"，这里照同一个判据补一遍
+			RefreshCardScrollCache(false);
+			for (int i = 0; i < _cardScrolls.Count; i++)
+			{
+				TowerDefenseCardScroll sc = _cardScrolls[i];
+				if (sc == null || !GodotObject.IsInstanceValid(sc) || !sc.IsInsideTree())
+				{
+					continue;
+				}
+				Control content = sc.GetChildOrNull<Control>(0);
+				if (content == null)
+				{
+					continue;
+				}
+				bool overflow = sc.Vertical
+					? content.Size.Y > sc.Size.Y + 0.5f
+					: content.Size.X > sc.Size.X + 0.5f;
+				if (overflow && !sc.ScrollingEnabled)
+				{
+					sc.ConfigureScrolling(true, sc.Vertical);
+					if (!_scrollFallbackWarned)
+					{
+						_scrollFallbackWarned = true;
+						Warn("卡带补刷降级：检测到溢出但 ScrollingEnabled=false，已强制 ConfigureScrolling(true)（宿主 RefreshCardScrolls 可能改名了）");
+					}
+				}
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>卡带降级自救只报一次。</summary>
+	private bool _scrollFallbackWarned;
+
+
+	/// <summary>
+	/// ★ v1.3.1：处理"时停中的卡带滚动 + 待定选卡"。
+	/// <para>由 <see cref="OnWindowInputForComponents"/>（`Window.WindowInput`，暂停时照样发）调用，
+	/// `vpEvent` 必须是**视口坐标**的副本（与引擎派发给 `_input` 的坐标系一致）。</para>
+	/// </summary>
+	private void HandleCardScrollInput(InputEvent vpEvent, Vector2 vpPos)
+	{
+		try
+		{
+			if (!_timeStopOn || vpEvent == null)
+			{
+				return;
+			}
+			// 诊断：确认"窗口输入中继"在时停期间真的在收事件（受 enableLog 门控，只报前几条）
+			if (EnableInfoLog && _scrollEventDiag < 5)
+			{
+				_scrollEventDiag++;
+				Info("SCROLL 窗口输入中继收到第 " + _scrollEventDiag + " 个事件：" + vpEvent.GetType().Name
+					+ " @ " + vpPos);
+			}
+			// ★ v1.3.1（审阅 M2）：维护"手指是否按在屏幕上"——
+			//   触摸拖动交给宿主 `_Input`（绝对赋值），本 Mod 的轮询（相对累加）必须让路。
+			if (vpEvent is InputEventScreenTouch touch)
+			{
+				_touchActive = touch.Pressed;
+			}
+			// 落在自家时停面板上 ⇒ 归面板，不滚卡带、不选卡。
+			// ★ v1.3.1（审阅 M3②）：早退前必须把"待定选卡"收尾，否则松手正好落在面板上时
+			//   这次点击会静默消失（`_deferredPickFire` 随后在 `DriveUiPicks` 里被面板早退吃掉）。
+			if (IsOverPanel(vpPos))
+			{
+				if (_deferredPickPending)
+				{
+					FinishDeferredPick(vpPos);
+				}
+				return;
+			}
+			// ① 让宿主自己的滚动逻辑跑起来（卡带的滚轮 / 触摸拖拽）
+			ForwardToCardScrolls(vpEvent);
+			// ①b 滚轮（选卡栏面板的普通 ScrollContainer）：宿主 GUI 派发被暂停门控，
+			//    这里自己按像素增量写 `ScrollVertical/Horizontal`（"写值"链在暂停时是活的）。
+			//    ⚠️ 鼠标**拖动**不走事件，走 `DriveScrollDragPolling()` 的物理帧轮询。
+			DriveScrollWheel(vpEvent, vpPos);
+
+			// ② 待定选卡：拖动即取消（等价宿主 `ScrollSelectionDragDistance`）
+			if (!_deferredPickPending)
+			{
+				return;
+			}
+			if (vpEvent is InputEventMouseMotion || vpEvent is InputEventScreenDrag)
+			{
+				// 审阅 S6：与宿主口径一致（`!(len < 16f)` ⇒ len>=16 即算拖动）
+				if (vpPos.DistanceTo(_deferredPickPos) >= ScrollDragThreshold)
+				{
+					_deferredPickCancelled = true;
+				}
+				return;
+			}
+			if (vpEvent is InputEventMouseButton mb && mb.ButtonIndex == MouseButton.Left && !mb.Pressed)
+			{
+				FinishDeferredPick(vpPos);
+				return;
+			}
+			if (vpEvent is InputEventScreenTouch st && !st.Pressed)
+			{
+				FinishDeferredPick(vpPos);
+			}
+		}
+		catch (Exception ex)
+		{
+			if (!_scrollFaultReported)
+			{
+				_scrollFaultReported = true;
+				Warn("卡带滚动处理异常（本条只报一次）：" + ex.Message);
+			}
+		}
+	}
+
+	/// <summary>
+	/// 松手：没被拖动取消就补做一次选卡。
+	/// <para>★ v1.3.1（审阅 M3①）：**松手时再复核一次距离** —— 「按下 → 甩动 &gt;16px → 松手」
+	/// 若全部落在两个物理帧之间（或 Motion 事件被吞），只靠事件置位 `_deferredPickCancelled`
+	/// 会漏判 ⇒ 照样选中按下点那张卡。这里用松手位置兜住。</para>
+	/// </summary>
+	private void FinishDeferredPick(Vector2 releasePos)
+	{
+		if (releasePos.DistanceTo(_deferredPickPos) >= ScrollDragThreshold)
+		{
+			_deferredPickCancelled = true;
+		}
+		bool fire = !_deferredPickCancelled;
+		_deferredPickPending = false;
+		_deferredPickCancelled = false;
+		if (fire)
+		{
+			_deferredPickFire = true;
+		}
+	}
+
+	/// <summary>清掉"待定选卡"状态（开启 / 解除时停、切场景时用）。</summary>
+	private void ResetDeferredPick()
+	{
+		_deferredPickPending = false;
+		_deferredPickFire = false;
+		_deferredPickCancelled = false;
+	}
+
+	/// <summary>命中判定（指定视口坐标；与 `HitControlInCanvas` 同一套坐标系口径）。</summary>
+	private static bool HitControlInCanvasAt(Control ctl, Vector2 vpPos)
+	{
+		try
+		{
+			if (ctl == null || !GodotObject.IsInstanceValid(ctl))
+			{
+				return false;
+			}
+			if (!ctl.IsInsideTree() || !ctl.IsVisibleInTree())
+			{
+				return false;
+			}
+			// 与 `HitControlInCanvas` 同法：`GetGlobalTransformWithCanvas()` 已经把
+			// CanvasLayer / 祖先 transform 全部算进去，与视口鼠标坐标天然同系。
+			Vector2 local = ctl.GetGlobalTransformWithCanvas().AffineInverse() * vpPos;
+			return new Rect2(Vector2.Zero, ctl.Size).HasPoint(local);
+		}
+		catch
+		{
+			return false;
 		}
 	}
 
@@ -1177,6 +1967,11 @@ public void Initialize(XWModRuntimeContext context)
 			{
 				return;
 			}
+			// ★ v1.3.1（审阅 S7）：本方法直接解引用 `_tree`，补一层空判
+			if (_tree == null || !GodotObject.IsInstanceValid(_tree) || _tree.Root == null)
+			{
+				return;
+			}
 			// ★★ v1.0.13 核心修复：**边沿触发**（只认"按下的那一瞬间"）
 			//
 			// v1.0.11 用的是 `Input.IsMouseButtonPressed(MouseButton.Left)` —— 这是**按住**语义：
@@ -1184,19 +1979,46 @@ public void Initialize(XWModRuntimeContext context)
 			// 而 `Pressed()` 内部是 `select = !select`（**切换**）⇒ 翻转偶数次**回到原样**，
 			// 表现就是"点了完全没反应"。更糟的是我还在每帧 `ClearDebounceStates()` 里
 			// 把游戏自带的 `pressDelayTimer = 0.2` 防抖清零了，等于亲手拆掉唯一的安全网。
-			// ⇒ 改为"按下瞬间处理一次"：`edge` 走本地轮询边沿，`fromRelay` 走 `_Input` 事件边沿
-			//    （双路冗余：任一路活着就不断，且同帧只消费一次）。
+			// ⇒ 改为"按下瞬间处理一次"：`edge` 走本地轮询边沿（**主力**）。
+			//   ⚠️ 第2轮复核 R3：`fromRelay`（`_pendingClick`）**实际上是死分支** ——
+			//   它来自 `InputRelayNode._Input`，而本 Mod 没有 Godot 源码生成器，
+			//   自定义节点的 `_Input` 引擎不会调（见 v1.0.14 说明与 `EnsureRelay` 注释）。
+			//   保留它只为兼容与可读性，**不要**据此认为"快速点击另有一路兜底"。
+			//
+			// ★★ v1.3.1：「按下落在**可滚动卡带**上」时改为**等松手再选卡** ——
+			//   因为时停期间拖动卡带滚动是靠本 Mod 的窗口输入中继驱动的，若按下就立刻选卡，
+			//   玩家"滑一下找卡"会顺手选中按下点那张卡（10-10 传送带/卡槽栏的反馈）。
+			//   判定口径与宿主一致：移动 > 16px（`TowerDefenseCardScroll.ScrollDeadzone`）算拖动，
+			//   松手时没被取消才补做一次选卡（`_deferredPickFire`）。
 			bool down = Input.IsMouseButtonPressed(MouseButton.Left);
 			bool edge = down && !_prevMouseDown;
 			_prevMouseDown = down;
 			bool fromRelay = _pendingClick;
 			_pendingClick = false;
-			if (!edge && !fromRelay)
+			// ★ v1.3.1 兜底 A：待定选卡期间左键已经松开（松手事件没收到，如松在窗口外）
+			//   ⇒ 按"松手"处理，避免这一次点击被永久挂住。
+			if (_deferredPickPending && !down)
+			{
+				FinishDeferredPick(_tree.Root.GetViewport()?.GetMousePosition() ?? _deferredPickPos);
+			}
+			// ★ v1.3.1 兜底 B：待定选卡期间鼠标已经挪开（拖动滚动）⇒ 取消选卡。
+			//   这里用轮询判，不依赖 `InputEventMouseMotion` 是否送达（同 A 的理由）。
+			if (_deferredPickPending && down)
+			{
+				Viewport vpNow = _tree.Root.GetViewport();
+				if (vpNow != null && vpNow.GetMousePosition().DistanceTo(_deferredPickPos) >= ScrollDragThreshold)
+				{
+					_deferredPickCancelled = true;
+				}
+			}
+			bool fromDeferred = _deferredPickFire;
+			_deferredPickFire = false;
+			if (!edge && !fromRelay && !fromDeferred)
 			{
 				return;
 			}
 			long f = _tree.GetFrame();
-			if (_lastPickClickFrame == f)
+			if (!fromDeferred && _lastPickClickFrame == f)
 			{
 				return;
 			}
@@ -1209,6 +2031,22 @@ public void Initialize(XWModRuntimeContext context)
 			//   不挡的话"点复选框"会顺带把下面那张卡选中/取消。
 			if (IsOverPanel(vpMouse))
 			{
+				return;
+			}
+			// ★★ v1.3.1：按下落在可滚动卡带上 ⇒ 先不选卡，等松手（见上）。
+			//   ⚠️ 只在"左键还按着"时才延后：按下+松手挤在同一物理帧的快速点击
+			//   （`edge` 已为 false、`down` 也已为 false）不会有后续松手事件，
+			//   再延后就等于**丢点击** ⇒ 这条分支必须带 `down`。
+			if (!fromDeferred && down && GetScrollableStripAt(vpMouse) != null)
+			{
+				_deferredPickPending = true;
+				_deferredPickCancelled = false;
+				_deferredPickPos = vpMouse;
+				if (EnablePickDiag && _scrollDiag < 30)
+				{
+					_scrollDiag++;
+					PickDiag("SCROLL 按下落在可滚动卡带上 ⇒ 延后到松手再选卡：" + vpMouse);
+				}
 				return;
 			}
 			bool diag = EnablePickDiag && _pickClickDiag++ < 40;
@@ -1711,11 +2549,16 @@ public void Initialize(XWModRuntimeContext context)
 			{
 				Name = "ModTimeStopInputRelay",
 				Entry = this,
-				// ★ 关键：Always ⇒ 暂停时 `_Input` 照常被调用
+				// ⚠️ 审阅 S8② 更正：本 Mod 是**手写 csproj（没有 Godot 源码生成器）**，
+				//   自定义 `Node` 子类的 `_Input` / `_PhysicsProcess` 引擎**根本不会调**
+				//   （v1.0.14 的结论，同文件顶部也有说明）⇒ 这个 Always 只为"万一"保留，
+				//   真正干活的是 `SceneTree.physics_frame` 信号（OnPhysicsFrame）与
+				//   `Window.WindowInput` 信号（OnWindowInputForComponents）。
+				//   别再指望 `InputRelayNode._Input` 能收到事件。
 				ProcessMode = Node.ProcessModeEnum.Always,
 			};
 			_tree.Root.AddChild(_relay, forceReadableName: false, @internal: Node.InternalMode.Disabled);
-			Info("已挂载输入转发节点（Always），时停期间代为接收种植/铲除/选卡输入。");
+			Info("已挂载输入转发节点（兼容保留；实际输入走 physics_frame / WindowInput 信号）。");
 		}
 		catch (Exception ex)
 		{
@@ -2973,6 +3816,14 @@ public void Initialize(XWModRuntimeContext context)
 			}
 			_savedTreePaused = _tree.Paused;
 			_timeStopOn = true;
+			// ★ v1.3.1：清掉上一次残留的"待定选卡"，并立刻抓一遍可滚动卡带
+			ResetDeferredPick();
+			_dragScroll = null;
+			_dragCandidate = null;
+			_touchActive = false;
+			RefreshCardScrollCache(true);
+			RefreshConveyorCardScrolls();   // 传送带卡带尺寸/可滚开关补刷（暂停后 _Process 不再跑）
+			ReportScrollSurfaces();          // 自检日志（受 enableLog 门控）
 			// ★ v1.1.2：只有"卡槽自动触发"才登记"预定自动解除"；0 = 不登记（只能手动解除）
 			_autoResumeDeadlineMs = (armAutoResume && _autoResumeSec > 0)
 				? (Time.GetTicksMsec() + (ulong)(_autoResumeSec * 1000)) : 0UL;
@@ -3000,6 +3851,7 @@ public void Initialize(XWModRuntimeContext context)
 		{
 			_timeStopOn = false;
 			_autoResumeDeadlineMs = 0UL;   // ★ 取消预订的自动解除（下次触发时停会重新计时）
+			ResetDeferredPick();           // ★ v1.3.1：清掉待定选卡状态
 			RestoreKeepAlive();
 			if (_tree != null && GodotObject.IsInstanceValid(_tree))
 			{
@@ -3902,6 +4754,18 @@ public void Initialize(XWModRuntimeContext context)
 				e2.DoubleClick = false;
 				forwarded = e2;
 			}
+			// ★ v1.3.1：**滚轮**也要克隆（原实现只认左键 ⇒ 滚轮在时停期间根本走不到转发）。
+			//   滚轮只喂给卡带滚动（`TowerDefenseCardScroll._Input`），不参与加农炮命中。
+			else if (ev is InputEventMouseButton mbWheel)
+			{
+				var e2 = new InputEventMouseButton();
+				e2.ButtonIndex = mbWheel.ButtonIndex;
+				e2.Pressed = mbWheel.Pressed;
+				e2.Factor = mbWheel.Factor;
+				e2.Position = WindowToViewport(mbWheel.Position);
+				e2.GlobalPosition = e2.Position;
+				forwarded = e2;
+			}
 			else if (ev is InputEventMouseMotion mm)
 			{
 				var e2 = new InputEventMouseMotion();
@@ -3918,6 +4782,14 @@ public void Initialize(XWModRuntimeContext context)
 			Vector2 vpPos = (forwarded is InputEventMouse me) ? me.Position
 				: (forwarded is InputEventScreenTouch st) ? st.Position
 				: (forwarded as InputEventScreenDrag)?.Position ?? Vector2.Zero;
+			// ★★ v1.3.1：先把事件喂给「卡带滚动」（= 宿主自己的 TowerDefenseCardScroll._Input），
+			//   并把"按下落在可滚动卡带上 ⇒ 等松手再选卡"的待定状态一起推进。
+			//   放在 `IsOverModButton`/加农炮转发之前 —— 滚轮与拖动不参与战斗操作。
+			HandleCardScrollInput(forwarded, vpPos);
+			if (forwarded is InputEventMouseButton wheelEv && wheelEv.ButtonIndex != MouseButton.Left)
+			{
+				return;                    // 滚轮只用于卡带滚动，不当左键用
+			}
 			if (IsOverModButton(vpPos))
 			{
 				return;                    // 点的是自家按钮 ⇒ 不指挥加农炮
