@@ -1,5 +1,9 @@
 # 时停（TimeStop）Mod
 
+> **v1.3.2（2026-11-09）**：修玩家反馈的**「时停状态下点不中已经掉落出来的卡牌」**（抽奖盒子 / 魔法豆 / 豌豆花瓶 / 灯笼菇 / 礼物机 / 卡片雨 等往战场上掉的卡 ⇒ 点不动就选不中、更种不下去）。
+> 真因：这些卡是宿主 `TowerDefenseManager.SpawnPacket()` 造出来的 `TowerDefenseInGamePacketShow`，挂在 `CharacterLayer/CharacterNode`（世界坐标）下，点它的入口是它自己的 `Body/Button`，走**原生 GUI 派发** —— `Paused = true` 时引擎只判「鼠标命中的最深 Control」的 `can_process()`，该按钮继承 `Pausable` ⇒ 点击派发不进去。
+> 修法（两条腿、互斥）：① 时停期间**只把这批卡的按钮单点保活**成 `ProcessMode.Always`（按钮没有每帧回调，不解冻任何逻辑）⇒ 走游戏原生「点击 → 按下 → 拿起卡」；② 按下那一瞬记下这张卡的 `select` 原值，2 帧后若没变（原生路没生效）⇒ 本 Mod 直调 `Pressed()` 兜底（必要时再补 `PickPacket`）。拿起后的**放置**沿用原通道（每帧驱动 `TowerDefenseBattleFeatureMap.ProcessInput()`），与卡槽里的卡一致。
+
 > **v1.3.1（2026-11-08）**：修玩家反馈的**「10-10 等卡槽栏 + 传送带同时出现的关卡，时停期间滚轮/拖动滚不了卡带、切不了卡」**。
 > 真因是宿主把卡槽栏与传送带都套进 `TowerDefenseCardScroll`（滚动条模式 = 永不显示 ⇒ 只剩滚轮/拖动），
 > 而滚轮与拖动实现在它的 `_Input()` 里 —— `Paused = true` 时引擎按 `can_process()` 门控，**根本不会调它**。
@@ -25,7 +29,7 @@
 但**仍能种植植物、铲除植物、收集阳光金币**；v1.3.0 起**还能搬植物**（原生整格搬移 + 手套，见下方版本历史）。
 
 - Mod ID：`timestop`
-- 版本：**1.3.1**
+- 版本：**1.3.2**
 
 > 完整版本历史见文末「版本历史」一节。
 - 入口类：`TimeStopEntry`（v1.1.0 起为 `partial`，面板部分在 `runtime_src/TimeStopPanel.cs`）

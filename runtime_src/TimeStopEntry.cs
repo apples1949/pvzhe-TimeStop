@@ -360,6 +360,8 @@ public void Initialize(XWModRuntimeContext context)
 			}
 			// ★ v1.3.1：预热卡带缓存（输入事件里要按它做命中/滚动，不能现场全树扫）
 			RefreshCardScrollCache(false);
+			// ★ v1.3.2：掉落卡的按下核对（原生路没生效就直调兜底）
+			CheckPendingWorldCard();
 		}
 		catch (Exception ex)
 		{
@@ -579,6 +581,9 @@ public void Initialize(XWModRuntimeContext context)
 			// 4) 时停期间：不断补充保活"新掉落的阳光/金币"（它们挂在 CharacterNode 下，
 			//    掉落物自己的 _Input 必须 Always 才收得到点击）
 			MaintainDroppableKeepAlive();
+
+			// 4b) ★ v1.3.2：场上「掉落卡牌」的按钮单点保活（让原生点击能派发进去）
+			MaintainDroppedPacketClick();
 
 			// 5) ★ v1.1.0：战斗设置页（BattleOption）兜底入口 —— 未设面板快捷键时注入按钮。
 			//    对话框每次打开都是新实例，所以每轮都查一次（幂等，靠 OptBtnName 去重）。
@@ -1301,6 +1306,15 @@ public void Initialize(XWModRuntimeContext context)
 			//    这里自己按像素增量写 `ScrollVertical/Horizontal`（"写值"链在暂停时是活的）。
 			//    ⚠️ 鼠标**拖动**不走事件，走 `DriveScrollDragPolling()` 的物理帧轮询。
 			DriveScrollWheel(vpEvent, vpPos);
+			// ①c ★ v1.3.2：**左键按下**这一瞬间（早于 GUI 派发）记下命中到的「场上掉落卡」，
+			//    2 帧后核对原生按钮通道有没有真的把它选中，没有就由本 Mod 直调兜底。
+			bool leftPress = (vpEvent is InputEventMouseButton mbc
+					&& mbc.ButtonIndex == MouseButton.Left && mbc.Pressed)
+				|| (vpEvent is InputEventScreenTouch stc && stc.Pressed);
+			if (leftPress)
+			{
+				NoteWorldCardPressIfAny(vpPos);
+			}
 
 			// ② 待定选卡：拖动即取消（等价宿主 `ScrollSelectionDragDistance`）
 			if (!_deferredPickPending)
@@ -1387,6 +1401,307 @@ public void Initialize(XWModRuntimeContext context)
 		{
 			return false;
 		}
+	}
+
+	// ================================================================ 时停中点选「场上掉落卡牌」（v1.3.2）
+
+	/// <summary>
+	/// ★★ v1.3.2（玩家反馈 2026-11-09）：**时停状态下点不中"已经掉落出来的卡牌"**，也就没法选中再种下去。
+	///
+	/// ── 这些卡是什么（解包实证）────────────────────────────────────
+	/// 游戏里「抽奖盒子 / 魔法豆 / 豌豆花瓶 / 灯笼菇 / 礼物机 / 卡片雨(RainMode)」等都会**往战场上掉卡**：
+	/// `TowerDefenseManager.SpawnPacketCore()`（`TowerDefenseManager.cs:2622-2655`）会
+	/// `CreatePacketShow()` 造一个 **`TowerDefenseInGamePacketShow`（Control！）**，
+	/// 挂到 `GetCharacterNode()`（= `CharacterLayer/CharacterNode`，Node2D）下，
+	/// 并 `BindSpawnedPacketPicker()`（:2687-2694）把它的 `OnPressed` 接到
+	/// `PacketPickControl.PickPacket`（:1242）—— **点一下就会把这张卡拿在手上准备种**。
+	///
+	/// ── 为什么时停点不动 ──────────────────────────────────────────
+	/// 点它的入口是它自己的 **`Button` 子节点**（场景 `Body/Button`，`CreateButton()` 里
+	/// 设 `ActionMode = Press`、`Pressed += OnCardButtonPressed` ⇒ `Pressed()` ⇒ `OnPressed`）。
+	/// 那是**原生 GUI 派发**（`Viewport::_gui_input_event`）：`Paused = true` 时只判
+	/// "鼠标命中的**最深** Control"的 `can_process()`，该 Button 继承 `Pausable` ⇒ 不派发 ⇒ 点不动。
+	/// 本 Mod v1.0.6 起的"手工命中 + 直调 `Pressed()`"旁路（`DriveUiPicks`）本可覆盖它，
+	/// 但要把**世界坐标里的卡**换算成命中矩形，比 HUD 卡更容易失手（相机 + CanvasLayer follow_viewport），
+	/// 实测就是"点不掉"。
+	///
+	/// ── 修法（两条腿，且**互斥**）──────────────────────────────────
+	/// ① **首选原生路**：时停期间只把这批卡的 `Button` 单点保活成 `ProcessMode.Always`
+	///    （Button 没有 `_process`/`_physics_process`，只有 `_gui_input` ⇒ **不会解冻任何逻辑**），
+	///    让引擎自己把点击派发进去 —— 走的就是游戏原生"点击→按下→`Pressed()`"。
+	///    解除时停由 `RestoreKeepAlive()` 原样还原。
+	/// ② **兜底直调**：按下那一刻（`Window.WindowInput` 早于 GUI 派发）记下这张卡的 `select` 原值，
+	///    2 个物理帧后若 `select` 没变 ⇒ 说明原生路没生效 ⇒ 本 Mod 直调 `Pressed()`
+	///    （必要时再补 `PickPacket()`），保证"一定能选中"。
+	///    ⚠️ 二者互斥靠的就是这个"事后核对"，绝不会重复触发（`Pressed()` 是 `select` 取反，双触发等于没点）。
+	/// </summary>
+	private TowerDefenseInGamePacketShow _pendingWorldCard;
+
+	/// <summary>按下瞬间那张掉落卡的 `select` 原值（事后核对原生路是否生效）。</summary>
+	private bool _pendingWorldSelectBefore;
+
+	/// <summary>按下时的帧号（隔 2 帧再核对）。</summary>
+	private long _pendingWorldFrame = -1;
+
+	/// <summary>最近一次**真的把掉落卡选中**的帧号（用于避开宿主 0.2s 防抖，见审阅 S1）。</summary>
+	private long _lastWorldPickFrame = -1;
+
+	/// <summary>场上掉落卡保活/兜底诊断计数（受 enableLog 门控）。</summary>
+	private int _worldCardDiag;
+
+	/// <summary>这张 `TowerDefenseInGamePacketShow` 是不是"世界里的掉落卡"（挂在 `CharacterNode` 下）。</summary>
+	private static bool IsWorldPacket(Node packet)
+	{
+		try
+		{
+			// 优先用宿主自己的 `GetCharacterNode()` 做**实例**比较（比名字可靠；
+			// 审阅建议：13 处 `SpawnPacket` 调用最后都走 `SpawnPacketCore` → AddChild(CharacterNode)）。
+			Node charNode = null;
+			try { charNode = TowerDefenseManager.GetCharacterNode(); } catch { }
+			int guard = 0;
+			for (Node p = packet?.GetParent(); p != null && guard++ < 16; p = p.GetParent())
+			{
+				if (charNode != null && GodotObject.IsInstanceValid(charNode) && p == charNode)
+				{
+					return true;
+				}
+				if (p.Name == "CharacterNode")
+				{
+					return true;      // 兜底（`GetCharacterNode()` 取不到时的同名判据）
+				}
+			}
+		}
+		catch { }
+		return false;
+	}
+
+	/// <summary>
+	/// 取掉落卡的点击按钮（场景路径 `Body/Button`；`CreateButton()` 是运行时建在这个槽位下的）。
+	/// 退化路径：递归找名字恰好是 `Button` 的 `BaseButton`（避开 `LoveButton`）。
+	/// </summary>
+	private static Button FindPacketButton(Node packet)
+	{
+		try
+		{
+			Button b = packet.GetNodeOrNull<Button>("Body/Button");
+			if (b != null && GodotObject.IsInstanceValid(b))
+			{
+				return b;
+			}
+			if (packet.GetNodeOrNull<BaseButton>("Body/Button") is BaseButton bb && bb is Button b2)
+			{
+				return b2;
+			}
+			return FindButtonByName(packet, 0);
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	private static Button FindButtonByName(Node node, int depth)
+	{
+		if (node == null || depth > 6)
+		{
+			return null;
+		}
+		int c = node.GetChildCount();
+		for (int i = 0; i < c; i++)
+		{
+			Node ch = node.GetChild(i);
+			if (ch is Button b && b.Name == "Button")
+			{
+				return b;
+			}
+			Button r = FindButtonByName(ch, depth + 1);
+			if (r != null)
+			{
+				return r;
+			}
+		}
+		return null;
+	}
+
+	/// <summary>
+	/// ★ v1.3.2：把场上所有**掉落卡**的 `Button` 单点保活（`Always`），让原生 GUI 派发能进得去。
+	/// <para>只动 Button 自己（不递归）：Button 没有每帧回调，只有 `_gui_input` ⇒ 时停语义不受影响。</para>
+	/// <para>幂等：已在 `_keptAlive` 里的不会重复加；解除时停由 `RestoreKeepAlive()` 统一还原。</para>
+	/// </summary>
+	private void MaintainDroppedPacketClick()
+	{
+		try
+		{
+			if (!_timeStopOn || _tree == null || !GodotObject.IsInstanceValid(_tree) || _tree.Root == null)
+			{
+				return;
+			}
+			var found = new List<Node>();
+			CollectByClassName(_tree.Root, 0, "TowerDefenseInGamePacketShow", found, 96);
+			int kept = 0;
+			// 清掉已经释放掉的记录（掉落卡有存活时间，会 QueueFree ⇒ `_keptAlive` 会攒失效引用）
+			for (int i = _keptAlive.Count - 1; i >= 0; i--)
+			{
+				Node n = _keptAlive[i].node;
+				if (n == null || !GodotObject.IsInstanceValid(n))
+				{
+					_keptAlive.RemoveAt(i);
+				}
+			}
+			foreach (Node n in found)
+			{
+				if (!(n is TowerDefenseInGamePacketShow packet) || !GodotObject.IsInstanceValid(packet))
+				{
+					continue;
+				}
+				if (!IsWorldPacket(packet))
+				{
+					continue;                 // HUD 里的卡槽/卡池卡走原旁路，不在这里动
+				}
+				Button btn = FindPacketButton(packet);
+				if (btn == null || !GodotObject.IsInstanceValid(btn))
+				{
+					continue;
+				}
+				if (btn.ProcessMode == Node.ProcessModeEnum.Always)
+				{
+					continue;                 // 已经保活过
+				}
+				kept += KeepAliveTarget(btn, false);
+			}
+			if (kept > 0 && EnableInfoLog && _worldCardDiag < 12)
+			{
+				_worldCardDiag++;
+				Info("WORLDCARD 保活掉落卡按钮 " + kept + " 个（原生点击通道就绪）");
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>
+	/// ★ v1.3.2：按下**那一刻**（GUI 派发之前）记下命中到的掉落卡，供 <see cref="CheckPendingWorldCard"/> 事后核对。
+	/// <para>由 <see cref="HandleCardScrollInput"/> 在窗口输入事件里调用（那时原生 Button 还没收到点击）。</para>
+	/// </summary>
+	private void NoteWorldCardPressIfAny(Vector2 vpPos)
+	{
+		try
+		{
+			_pendingWorldCard = null;
+			_pendingWorldFrame = -1;
+			var found = new List<Node>();
+			CollectByClassName(_tree.Root, 0, "TowerDefenseInGamePacketShow", found, 96);
+			foreach (Node n in found)
+			{
+				if (!(n is TowerDefenseInGamePacketShow packet) || !GodotObject.IsInstanceValid(packet))
+				{
+					continue;
+				}
+				if (!IsWorldPacket(packet) || !packet.IsInsideTree() || !packet.IsVisibleInTree())
+				{
+					continue;
+				}
+				Button btn = FindPacketButton(packet);
+				Control target = (Control)btn ?? packet;
+				if (!HitControlInCanvasAt(target, vpPos))
+				{
+					continue;
+				}
+				_pendingWorldCard = packet;
+				_pendingWorldSelectBefore = packet.select;
+				_pendingWorldFrame = _tree.GetFrame();
+				if (EnableInfoLog && _worldCardDiag < 20)
+				{
+					_worldCardDiag++;
+					Info("WORLDCARD 按下命中掉落卡 " + packet.Name + " select=" + _pendingWorldSelectBefore
+						+ " 按钮模式=" + (btn != null ? btn.ProcessMode.ToString() : "null")
+						+ " canProcess=" + (btn != null && btn.CanProcess()));
+				}
+				return;
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>
+	/// ★ v1.3.2：按下 2 个物理帧后核对 —— 原生路若没把 `select` 翻过来，就本 Mod 直调兜底。
+	/// </summary>
+	private void CheckPendingWorldCard()
+	{
+		try
+		{
+			if (_pendingWorldCard == null)
+			{
+				return;
+			}
+			if (_pendingWorldFrame < 0 || _tree == null || !GodotObject.IsInstanceValid(_tree))
+			{
+				_pendingWorldCard = null;
+				return;
+			}
+			if (_tree.GetFrame() - _pendingWorldFrame < 2)
+			{
+				return;
+			}
+			TowerDefenseInGamePacketShow packet = _pendingWorldCard;
+			_pendingWorldCard = null;
+			if (!GodotObject.IsInstanceValid(packet) || !packet.IsInsideTree())
+			{
+				return;
+			}
+			if (packet.select != _pendingWorldSelectBefore)
+			{
+				// 原生路生效了 ⇒ 什么都不做（避免 Pressed() 二次取反）
+				return;
+			}
+			// 原生路没生效 ⇒ 直调兜底
+			// ★ 审阅 S1：**不要无条件清 `pressDelayTimer`** —— 它只在宿主
+			//   `TowerDefenseInGamePacketShow._PhysicsProcess` 里递减，时停期间永不归零；
+			//   如果每次兜底都清零，就会绕过宿主的 0.2s 防抖 ⇒ 快速双击变成"拿起 → 立刻取消"。
+			//   改成：刚成功点过（12 帧 ≈ 0.2s 内）就只记录、不兜底。
+			long nowFrame = _tree.GetFrame();
+			if (_lastWorldPickFrame >= 0 && nowFrame - _lastWorldPickFrame <= 12)
+			{
+				return;
+			}
+			SetMember(packet, "_pressDelayTimer", 0.0);
+			SetMember(packet, "pressDelayTimer", 0.0);
+			bool before = packet.select;
+			InvokeMethod(packet, "Pressed");
+			if (packet.select == before)
+			{
+				// `Pressed()` 仍被前置条件挡住（alive/lock/onlyDraw/enforceRuntimeAvailabilityOnPress 等）
+				// ⇒ 直接把"拿起这张卡"做完。
+				// ★★ 审阅 M1：`select` 是**属性**（`TowerDefenseInGamePacketShow.cs:451-465`），
+				//   必须用属性赋值；`SetMember` 只写字段 ⇒ 静默无效，而随后的 `PickPacket`
+				//   会因为 `select==false` 走宿主的 `Release()`（把玩家手上正拿着的卡放掉）。
+				if (packet.alive || packet.allowPressWhenUnavailable)
+				{
+					packet.select = true;
+					object pickControl = TowerDefenseManager.Instance?.GetPacketPickControl();
+					if (pickControl != null)
+					{
+						InvokeMethod(pickControl, "PickPacket", packet);
+					}
+				}
+			}
+			if (packet.select != before)
+			{
+				_lastWorldPickFrame = nowFrame;
+			}
+			if (EnableInfoLog && _worldCardDiag < 30)
+			{
+				_worldCardDiag++;
+				Info("WORLDCARD 兜底直调：" + packet.Name + " select " + before + " → " + packet.select);
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>清掉"待核对的掉落卡"（开/关时停时调用）。</summary>
+	private void ResetWorldCardPress()
+	{
+		_pendingWorldCard = null;
+		_pendingWorldFrame = -1;
 	}
 
 	// ================================================================ 旁路驱动节点（v1.0.6 核心）
@@ -2107,6 +2422,14 @@ public void Initialize(XWModRuntimeContext context)
 			{
 				try
 				{
+					// ★★ v1.3.2：**场上掉落卡不在本函数里点** —— 它们改走"原生按钮通道"
+					//   （`MaintainDroppedPacketClick` 单点保活 `Body/Button`），
+					//   并由 `NoteWorldCardPressIfAny` + `CheckPendingWorldCard` 事后兜底。
+					//   若这里再直调 `Pressed()`，会和原生路的 `Pressed()` 各翻一次 `select` ⇒ 等于没点。
+					if (IsWorldPacket(p))
+					{
+						continue;
+					}
 					// 命中判定优先用其 Button 子节点（玩家点的是按钮）
 					Control target = null;
 					var btns = new List<Node>();
@@ -3818,6 +4141,7 @@ public void Initialize(XWModRuntimeContext context)
 			_timeStopOn = true;
 			// ★ v1.3.1：清掉上一次残留的"待定选卡"，并立刻抓一遍可滚动卡带
 			ResetDeferredPick();
+			ResetWorldCardPress();          // ★ v1.3.2：清掉待核对的掉落卡
 			_dragScroll = null;
 			_dragCandidate = null;
 			_touchActive = false;
@@ -3852,6 +4176,7 @@ public void Initialize(XWModRuntimeContext context)
 			_timeStopOn = false;
 			_autoResumeDeadlineMs = 0UL;   // ★ 取消预订的自动解除（下次触发时停会重新计时）
 			ResetDeferredPick();           // ★ v1.3.1：清掉待定选卡状态
+			ResetWorldCardPress();         // ★ v1.3.2：清掉待核对的掉落卡
 			RestoreKeepAlive();
 			if (_tree != null && GodotObject.IsInstanceValid(_tree))
 			{
@@ -3986,6 +4311,13 @@ public void Initialize(XWModRuntimeContext context)
 			// ★ 3) 挂载"旁路驱动节点"（Always，挂在 SceneTree.Root 下）：
 			//   让「种植 / 铲除 / 选卡 / 收阳光」在暂停期间仍能工作的**真正关键**。
 			EnsureRelay();
+
+			// ★ 3b) v1.3.2：场上**掉落卡牌**的按钮单点保活（原生点击通道）。
+			//   ⚠️ 与 2b) 的"不保活顶部 HUD"不冲突：这里只保活"世界里的卡"的
+			//   `Body/Button` 一个叶子节点（Button 没有每帧回调），
+			//   且这些卡**不会**再被 `DriveUiPicks()` 手工点（见那里的 `IsWorldPacket` 跳过），
+			//   不会出现"双击切换 = 无变化"。
+			MaintainDroppedPacketClick();
 
 			Info("保活完成：共 " + _keptAlive.Count + " 个节点（禁区 " + _protected.Count
 				+ " 个：CharacterNode 祖先链 + 根，绝不改）。地图控件=" + nMap
